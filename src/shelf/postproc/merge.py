@@ -1,8 +1,13 @@
-"""Склейка данных OCR + QR (QR имеет приоритет)."""
+"""Склейка данных OCR + QR.
+
+Приоритеты:
+- QR-поля (barcode, цены) > OCR (QR надёжнее, не искажён перспективой)
+- OCR-поле > пустая строка (если QR не дал данных — ставим OCR)
+- barcode: если QR-barcode есть → копируем в barcode (кросс-валидация)
+"""
 
 from shelf.schema import PriceTag
 
-# Поля, в которых QR доминирует над OCR
 _QR_PRIORITY_FIELDS = {
     "qr_code_barcode",
     "price1_qr",
@@ -15,14 +20,36 @@ _QR_PRIORITY_FIELDS = {
     "wholesale_level_2_price",
     "action_price_qr",
     "action_code_qr",
-    "barcode",  # QR-barcode кросс-валидируется с OCR, но доверяем QR
 }
 
 
 def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
-    """Наложить QR-поля поверх OCR-тегов."""
-    merged = ocr_tag.__dict__.copy()
+    """Наложить QR-поля поверх OCR-результата."""
+    data = ocr_tag.__dict__.copy()
     for field, value in qr_fields.items():
-        if field in _QR_PRIORITY_FIELDS and value:
-            merged[field] = value
-    return PriceTag(**merged)
+        if value and value.strip():
+            if field in _QR_PRIORITY_FIELDS:
+                data[field] = value
+            elif not data.get(field):
+                data[field] = value
+
+    # Если QR дал barcode → используем как основной barcode (если OCR не дал)
+    qr_bc = data.get("qr_code_barcode", "нет")
+    if qr_bc and qr_bc != "нет" and not data.get("barcode"):
+        data["barcode"] = _normalize_barcode(qr_bc)
+
+    return PriceTag(**data)
+
+
+def _normalize_barcode(raw: str) -> str:
+    """Нормализовать штрихкод: убрать .0, lpad до 13 цифр."""
+    try:
+        raw = raw.strip()
+        if "." in raw:
+            raw = str(int(float(raw)))
+        raw = raw.replace(" ", "")
+        if raw.isdigit() and len(raw) < 13:
+            raw = raw.zfill(13)
+        return raw
+    except (ValueError, OverflowError):
+        return raw
