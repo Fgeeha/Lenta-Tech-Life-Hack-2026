@@ -1,26 +1,60 @@
+# Python
 __pycache__/
 *.pyc
-.venv/
-dist/
+*.pyo
+*.pyd
+.Python
 *.egg-info/
-results/*.json
-results/*.pt
-paper/figures/*.pdf
-paper/figures/*.png
-/data/
-*.db
+dist/
+build/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Poetry lock — трекаем для воспроизводимости
+# poetry.lock
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+*.cover
+
+# Linting
+.ruff_cache/
+
+# Editors
 .idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Logs
+*.log
+**/*.log
+
+# Data (исходные видео и CSV не трекаем через git)
+/Данные/
+/Материалы/
+
+# Model weights and runs
+runs/
+*.pt
+*.onnx
+*.pkl
+
+# Misc
+*.zip
+*.tar.gz
+*.db
 outputs/
 wandb/
 mlruns/
-.pytest_cache/
-htmlcov/
-*.log
-**/*.log
-.vscode/
-*.zip
-*.tar.gz
-
-/Данные
-/Материалы
+/tmp/

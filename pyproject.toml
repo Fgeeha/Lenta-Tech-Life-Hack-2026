@@ -1,0 +1,48 @@
+[tool.poetry]
+name = "shelf"
+version = "0.1.0"
+description = "Shelf Under Control — price tag recognition pipeline"
+authors = ["lenta-hack <lenta-hack@local>"]
+readme = "README.md"
+packages = [{include = "shelf", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+opencv-python-headless = "^4.10"
+pandas = "^2.2"
+gradio = "^4.44"
+Pillow = "^10.4"
+
+[tool.poetry.group.ml.dependencies]
+ultralytics = "^8.3"
+supervision = "^0.23"
+pyzbar = "^0.1.9"
+qreader = "^3.8"
+
+[tool.poetry.group.ocr.dependencies]
+paddleocr = "^2.7"
+paddlepaddle = "^2.6"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+ruff = "^0.6"
+black = "^24.8"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
