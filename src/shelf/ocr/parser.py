@@ -125,7 +125,6 @@ def parse_ocr_result(
     top_boxes = [b for b in boxes if b.center_y < 0.40]
     mid_boxes = [b for b in boxes if 0.20 <= b.center_y <= 0.75]
     bot_boxes = [b for b in boxes if b.center_y > 0.60]
-    all_texts = [b.text for b in boxes]
 
     # Название: самый высокий бокс с наибольшей площадью в верхней трети
     if top_boxes:

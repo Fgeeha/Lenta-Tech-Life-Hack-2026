@@ -75,9 +75,9 @@ def preprocess_crop(
     # 5. CLAHE на L-канале LAB для улучшения контраста
     if clahe:
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
+        lch, ach, bch = cv2.split(lab)
         clahe_obj = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l = clahe_obj.apply(l)
-        img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+        lch = clahe_obj.apply(lch)
+        img = cv2.cvtColor(cv2.merge([lch, ach, bch]), cv2.COLOR_LAB2BGR)
 
     return img
