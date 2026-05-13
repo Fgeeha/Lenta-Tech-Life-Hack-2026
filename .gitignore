@@ -52,9 +52,14 @@ runs/
 *.onnx
 *.pkl
 
-# Pseudo-label dataset (большой, не трекаем в git)
+# Pseudo-label dataset and tiled training images (большие, не трекаем в git)
 data/pseudo/
+data/tiles/
 models/*.pt
+
+# Claude Code session files
+.claude/
+claude.md
 
 # Misc
 *.zip
