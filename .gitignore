@@ -41,8 +41,9 @@ Thumbs.db
 **/*.log
 
 # Data (исходные видео и CSV не трекаем через git)
-/Данные/
-!Данные/.gitkeep
+/Данные/*
+!/Данные/
+!/Данные/.gitkeep
 /Материалы/
 
 # Model weights and runs
