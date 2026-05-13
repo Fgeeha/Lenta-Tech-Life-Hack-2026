@@ -39,7 +39,6 @@ def process_video(
     min_hits: int,
     adaptive: bool,
     detector_name: str,
-    progress: gr.Progress = gr.Progress(),
 ) -> tuple[str | None, pd.DataFrame, str]:
     """Обработать загруженное видео, вернуть (csv_path, preview_df, status)."""
     if video_path is None:
@@ -52,10 +51,7 @@ def process_video(
         logger.warning("Video %.0fs > limit %ds, truncating", dur, _MAX_DURATION_SEC)
 
     try:
-        progress(0, desc="Инициализация детектора и OCR...")
         logger.info("Обработка %s (детектор: %s)", Path(video_path).name, detector_name)
-
-        progress(0.1, desc="Сэмплирование кадров и детекция...")
         df = pipeline.run(
             video_path,
             interval_ms=int(interval_ms),
@@ -65,7 +61,6 @@ def process_video(
             max_duration_sec=_MAX_DURATION_SEC,
         )
 
-        progress(0.9, desc="Сохранение CSV...")
         if df.empty:
             return None, pd.DataFrame(), warn + "Ценники не найдены"
 
@@ -81,7 +76,6 @@ def process_video(
             f"Строк с price_card: {(df.price_card != '').sum()}\n"
             f"Строк с barcode: {(df.barcode != '').sum()}"
         )
-        progress(1.0, desc="Готово")
         return tmp.name, preview, status_msg
 
     except Exception as exc:
