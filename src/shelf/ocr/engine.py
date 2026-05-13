@@ -8,9 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 class OCREngine:
-    """PaddleOCR (PP-OCRv4), русский язык, ленивая загрузка."""
+    """PaddleOCR (PP-OCRv4), English модель (лучше читает числа и латиницу).
 
-    def __init__(self, lang: str = "ru") -> None:
+    Примечание: lang='en' выбран намеренно — ценники Ленты содержат числа,
+    латиницу (бренды) и цифровые поля. English модель читает их точнее ru.
+    """
+
+    def __init__(self, lang: str = "en") -> None:
         self.lang = lang
         self._ocr = None
 

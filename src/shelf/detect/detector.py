@@ -185,5 +185,91 @@ class YOLODetector:
         return out
 
 
+class YOLOFineTunedDetector:
+    """YOLOv8n дообученный на псевдо-лейблах ценников.
+
+    Использует очень низкий conf (0.02) — модель неуверена на маленьких объектах,
+    но ByteTrack фильтрует нестабильные срабатывания через min_hits.
+    """
+
+    _WEIGHTS = "models/pricetag_yolov8n.pt"
+
+    def __init__(
+        self,
+        weights: str | None = None,
+        confidence: float = 0.02,
+        process_width: int = 1280,
+    ):
+        self.weights = weights or self._WEIGHTS
+        self.confidence = confidence
+        self.process_width = process_width
+        self._model = None
+
+    def _load(self) -> None:
+        from pathlib import Path
+
+        from ultralytics import YOLO
+
+        w = Path(self.weights)
+        if not w.exists():
+            logger.warning("Веса не найдены: %s → фоллбек на yolov8n.pt", w)
+            self.weights = "yolov8n.pt"
+        self._model = YOLO(self.weights)
+        logger.info("YOLO fine-tuned загружен: %s", self.weights)
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        if self._model is None:
+            self._load()
+        h, w = frame.shape[:2]
+        scale = min(1.0, self.process_width / max(w, h))
+        small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1.0 else frame
+        results = self._model(small, verbose=False, conf=self.confidence)[0]
+        dets: list[Detection] = []
+        for box in results.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            conf = float(box.conf[0])
+            det = Detection(
+                int(x1 / scale),
+                int(y1 / scale),
+                int(x2 / scale),
+                int(y2 / scale),
+                conf,
+                "tag",
+            )
+            if det.area >= _MIN_AREA_ORIG and _ASPECT_MIN <= det.aspect <= _ASPECT_MAX:
+                dets.append(det)
+        return _nms(dets)
+
+    def visualize(self, frame: np.ndarray, detections: list[Detection]) -> np.ndarray:
+        out = frame.copy()
+        for d in detections:
+            cv2.rectangle(out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 180, 255), 6)
+            cv2.putText(
+                out,
+                f"ft {d.confidence:.3f}",
+                (d.x_min, max(40, d.y_min - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.5,
+                (0, 180, 255),
+                4,
+            )
+        return out
+
+
+def make_detector(name: str = "mser") -> "MSERDetector | YOLODetector | YOLOFineTunedDetector":
+    """Фабрика детекторов по имени.
+
+    name: 'mser' | 'yolo' | 'yolo-ft'  (или через SHELF_DETECTOR env)
+    """
+    import os
+
+    name = os.environ.get("SHELF_DETECTOR", name).lower()
+    if name == "yolo-ft":
+        return YOLOFineTunedDetector()
+    if name == "yolo":
+        return YOLODetector()
+    return MSERDetector()
+
+
 # Алиас по умолчанию — MSER без обучения
 PriceTagDetector = MSERDetector

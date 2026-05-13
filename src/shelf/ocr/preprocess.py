@@ -40,21 +40,25 @@ def deskew_angle(img: np.ndarray) -> float:
 
 def preprocess_crop(
     crop: np.ndarray,
-    rotate_180: bool = True,
+    rotate_180: bool = True,  # параметр оставлен для обратной совместимости
     deskew: bool = True,
-    upscale: int = 3,
+    upscale: int = 5,
     sharpen: bool = True,
     clahe: bool = True,
 ) -> np.ndarray:
-    """Подготовить кроп ценника для OCR."""
+    """Подготовить кроп ценника для OCR.
+
+    Ценники Ленты смонтированы боком: правильный поворот 90°CCW.
+    Параметр rotate_180 сохранён для совместимости, фактически делаем 90°CCW.
+    """
     if crop is None or crop.size == 0:
         return crop
 
     img = crop.copy()
 
-    # 1. Поворот 180° (ценники смонтированы инвертированно)
+    # 1. Поворот 90°CCW — ценники смонтированы боком, не 180°
     if rotate_180:
-        img = cv2.rotate(img, cv2.ROTATE_180)
+        img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
     # 2. Deskew (коррекция наклона ±15°)
     if deskew:

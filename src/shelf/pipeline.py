@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from shelf.detect.detector import MSERDetector
+from shelf.detect.detector import make_detector
 from shelf.detect.tracker import Tracker
 from shelf.io.video import sample_frames
 from shelf.io.writer import write_csv
@@ -45,9 +45,9 @@ def _extract_tag(
         )
 
     # --- QR ---
-    # Ценники смонтированы 180°; пробуем оба направления
+    # Ценники смонтированы боком (90°CCW для чтения); пробуем все ориентации
     qr_fields: dict[str, str] = {}
-    for rot_code in [None, cv2.ROTATE_180, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+    for rot_code in [cv2.ROTATE_90_COUNTERCLOCKWISE, None, cv2.ROTATE_180, cv2.ROTATE_90_CLOCKWISE]:
         rotated = cv2.rotate(crop_raw, rot_code) if rot_code is not None else crop_raw
         qr_fields = decode_qr(rotated)
         if qr_fields:
@@ -80,6 +80,7 @@ def run(
     adaptive: bool = True,
     min_hits: int = 2,
     output_csv: str | Path | None = None,
+    detector_name: str = "mser",
 ) -> pd.DataFrame:
     """Обработать видео → вернуть DataFrame по схеме OUTPUT_COLUMNS.
 
@@ -93,7 +94,7 @@ def run(
     video_path = Path(video_path)
     filename = video_path.name
 
-    detector = MSERDetector()
+    detector = make_detector(detector_name)
     tracker = Tracker(min_hits=min_hits)
     ocr_engine = OCREngine()
 

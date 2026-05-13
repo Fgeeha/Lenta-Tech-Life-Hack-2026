@@ -1,53 +1,71 @@
 """Маппинг OCR-боксов → поля ценника.
 
-Алгоритм:
-1. Нормализуем боксы в координаты [0,1] относительно кропа ценника
-2. Классифицируем каждый бокс по позиции (верх/середина/низ, левый/правый)
-3. Применяем регулярные выражения для извлечения цен, дат, артикулов
-4. QR-поля вставляются через merge.py (не здесь)
+После поворота 90°CCW структура ценника (сверху вниз в кропе):
+  - Белая зона: product_name, id_sku, print_datetime, barcode, QR-код
+  - Оранжевая зона: price_card (крупно), price_default (мелко), discount_amount
+
+Парсинг: сначала ищем числовые паттерны (цены, штрихкоды),
+затем текстовые (название, скидка).
 """
 
 import re
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 from shelf.schema import PriceTag
 
-# Регулярные выражения
-_PRICE_RE = re.compile(r"(\d{1,6})[,.](\d{2})")  # 129,99 или 129.99
-_PRICE_INT_RE = re.compile(r"(\d{1,6})\s*₽?(?!\d)")  # 130 (без копеек)
-_DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}")  # 03.04.2026 3:08
-_BARCODE_RE = re.compile(r"\b\d{8,14}\b")  # штрихкод 8-14 цифр
-_SKU_RE = re.compile(r"\b\d{6,10}\b")  # артикул 6-10 цифр
-_DISCOUNT_RE = re.compile(r"-\s*(\d+\s*%|\d+\s*[₽рР])")  # -48% или -150₽
-_SPECIAL_RE = re.compile(r"\b[кКлЛшШ]\b")  # К/Л/Ш символы
-_CODE_RE = re.compile(r"\d{2}_\d{6,}")  # код зоны типа 13_043015
+# --- Регулярные выражения ---
+# Цена: 129, 129.99, 129,99  (от 2 до 6 цифр, опционально дробная часть)
+_PRICE_RE = re.compile(r"\b(\d{2,6})(?:[.,](\d{2}))?\b")
+# Дата: 03.04.2026 3:08
+_DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}")
+# Штрихкод EAN: 8-14 цифр подряд
+_BARCODE_RE = re.compile(r"\b\d{8,14}\b")
+# Артикул SKU: 6-10 цифр (не EAN)
+_SKU_RE = re.compile(r"\b\d{6,10}\b")
+# Скидка: -48%  или  -23%
+_DISCOUNT_PCT_RE = re.compile(r"[-–]\s*(\d{1,2})\s*%")
+# Специальный символ: К, Л, Ш
+_SPECIAL_RE = re.compile(r"\b([КкЛлШш])\b")
+# Код зоны: 13_043015
+_CODE_RE = re.compile(r"\b\d{2}_\d{6,}\b")
 
 
-def _normalize_box(box: list, w: int, h: int) -> tuple[float, float, float, float]:
-    """Перевести 4-точечный bbox в (x0,y0,x1,y1) нормализованные."""
-    xs = [p[0] for p in box]
-    ys = [p[1] for p in box]
-    return min(xs) / w, min(ys) / h, max(xs) / w, max(ys) / h
+def _find_orange_rows(img: np.ndarray) -> tuple[int, int]:
+    """Найти строки с оранжевым фоном (ценовая зона)."""
+    if img is None or img.size == 0:
+        return 0, img.shape[0] if img is not None else 0
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array([8, 60, 80]), np.array([40, 255, 255]))
+    row_sums = mask.sum(axis=1) / 255.0
+    threshold = img.shape[1] * 0.15
+    orange_rows = np.where(row_sums > threshold)[0]
+    if len(orange_rows) == 0:
+        # Нет оранжевого → берём нижние 40% как ценовую зону
+        return int(img.shape[0] * 0.6), img.shape[0]
+    return max(0, int(orange_rows[0]) - 10), min(img.shape[0], int(orange_rows[-1]) + 10)
 
 
-def _extract_price(text: str) -> str:
-    """Извлечь цену из строки."""
-    m = _PRICE_RE.search(text)
-    if m:
-        return f"{m.group(1)},{m.group(2)}"
-    m = _PRICE_INT_RE.search(text)
-    if m:
-        return m.group(1)
-    return ""
+def _extract_prices(texts: list[str]) -> list[float]:
+    """Извлечь все числа, похожие на цены."""
+    prices = []
+    for text in texts:
+        for m in _PRICE_RE.finditer(text):
+            integer = int(m.group(1))
+            frac = int(m.group(2)) if m.group(2) else 0
+            val = integer + frac / 100.0
+            if 1.0 <= val <= 99999.0:
+                prices.append(val)
+    return sorted(prices)
 
 
 @dataclass
 class OCRBox:
     text: str
     conf: float
-    x0: float  # нормализованные координаты
+    x0: float
     y0: float
     x1: float
     y1: float
@@ -57,16 +75,14 @@ class OCRBox:
         return (self.y0 + self.y1) / 2
 
     @property
-    def center_x(self) -> float:
-        return (self.x0 + self.x1) / 2
+    def area(self) -> float:
+        return (self.x1 - self.x0) * (self.y1 - self.y0)
 
-    @property
-    def height(self) -> float:
-        return self.y1 - self.y0
 
-    @property
-    def width(self) -> float:
-        return self.x1 - self.x0
+def _normalize_box(box: list, w: int, h: int) -> tuple[float, float, float, float]:
+    xs = [p[0] for p in box]
+    ys = [p[1] for p in box]
+    return min(xs) / w, min(ys) / h, max(xs) / w, max(ys) / h
 
 
 def parse_ocr_result(
@@ -77,23 +93,23 @@ def parse_ocr_result(
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0),
     color: str = "red",
 ) -> PriceTag:
-    """Преобразует OCR-текст в PriceTag.
+    """Извлечь поля ценника из OCR-результатов.
 
-    Стратегия «сверху вниз»:
-    - Верхняя треть (y < 0.33): product_name — самый высокий текст
-    - Средняя область: цены — ищем паттерны price_default / price_card
-    - Нижняя треть (y > 0.67): barcode, id_sku, print_datetime, code
+    crop — препроцессированный (90°CCW + upscale) кроп, используется
+    для нахождения оранжевой зоны (ценовой секции).
     """
     x_min, y_min, x_max, y_max = bbox
     crop_h = max(1, y_max - y_min)
     crop_w = max(1, x_max - x_min)
 
-    # Строим список OCRBox
+    # --- Боксы ---
     boxes: list[OCRBox] = []
     for raw_box, text, conf in ocr_lines:
-        if not text.strip():
+        if not text.strip() or conf < 0.3:
             continue
-        x0, y0, x1, y1 = _normalize_box(raw_box, crop_w, crop_h)
+        h_img = crop.shape[0] if crop is not None else crop_h
+        w_img = crop.shape[1] if crop is not None else crop_w
+        x0, y0, x1, y1 = _normalize_box(raw_box, w_img, h_img)
         boxes.append(OCRBox(text=text.strip(), conf=conf, x0=x0, y0=y0, x1=x1, y1=y1))
 
     if not boxes:
@@ -107,92 +123,90 @@ def parse_ocr_result(
             color=color,
         )
 
-    # Сортируем по Y (сверху вниз)
     boxes.sort(key=lambda b: b.center_y)
+    all_texts = [b.text for b in boxes]
 
-    # --- Извлечение полей ---
-    product_name = ""
-    price_default = ""
+    # --- Оранжевая зона (ценовая секция) ---
+    # После 90°CCW в препроцессированном кропе оранжевая зона = нижняя часть
+    price_zone_start = 0.5  # нижние 50% по умолчанию
+    if crop is not None:
+        oy0, oy1 = _find_orange_rows(crop)
+        price_zone_start = oy0 / max(1, crop.shape[0])
+
+    price_boxes = [b for b in boxes if b.center_y >= price_zone_start]
+    info_boxes = [b for b in boxes if b.center_y < price_zone_start]
+
+    # --- Цены ---
     price_card = ""
+    price_default = ""
+    all_prices = _extract_prices([b.text for b in price_boxes] + all_texts)
+
+    if len(all_prices) >= 2:
+        price_card = f"{all_prices[0]:.2f}".replace(".", ",")
+        price_default = f"{all_prices[-1]:.2f}".replace(".", ",")
+    elif len(all_prices) == 1:
+        price_card = f"{all_prices[0]:.2f}".replace(".", ",")
+
+    # --- Скидка ---
     discount_amount = "нет"
-    barcode = ""
-    id_sku = ""
-    print_datetime = ""
-    code = "нет"
-    additional_info = "нет"
-    special_symbols = "нет"
-
-    top_boxes = [b for b in boxes if b.center_y < 0.40]
-    mid_boxes = [b for b in boxes if 0.20 <= b.center_y <= 0.75]
-    bot_boxes = [b for b in boxes if b.center_y > 0.60]
-
-    # Название: самый высокий бокс с наибольшей площадью в верхней трети
-    if top_boxes:
-        largest = max(top_boxes, key=lambda b: b.height * b.width * b.conf)
-        product_name = largest.text
-
-    # Цены — ищем паттерны в средней зоне
-    prices_found: list[str] = []
-    for b in mid_boxes:
-        p = _extract_price(b.text)
-        if p:
-            prices_found.append(p)
-
-    if len(prices_found) >= 2:
-        # Предполагаем: первая (меньшая) = без карты, вторая (крупнее) = с картой
-        prices_found_sorted = sorted(prices_found, key=lambda x: float(x.replace(",", ".")))
-        price_card = prices_found_sorted[0]  # наименьшая = цена по карте
-        price_default = prices_found_sorted[-1]  # наибольшая = без карты
-    elif len(prices_found) == 1:
-        price_card = prices_found[0]
-
-    # Скидка
-    for b in boxes:
-        m = _DISCOUNT_RE.search(b.text)
+    for text in all_texts:
+        m = _DISCOUNT_PCT_RE.search(text)
         if m:
-            discount_amount = m.group(0).strip()
+            discount_amount = f"-{m.group(1)}%"
             break
 
-    # Штрихкод (нижняя треть, длинный числовой код)
-    for b in bot_boxes:
-        m = _BARCODE_RE.search(b.text)
+    # --- Название продукта ---
+    product_name = ""
+    if info_boxes:
+        # Берём боксы с наибольшим conf и размером из информационной зоны
+        name_candidates = [b for b in info_boxes if len(b.text) > 3 and b.conf > 0.5]
+        if name_candidates:
+            product_name = " ".join(b.text for b in name_candidates[:4])
+
+    # --- Штрихкод ---
+    barcode = ""
+    for text in all_texts:
+        m = _BARCODE_RE.search(text)
         if m and len(m.group(0)) >= 10:
             barcode = m.group(0)
             break
 
-    # Артикул SKU (нижняя треть, 6-9 цифр, не штрихкод)
-    for b in bot_boxes:
-        m = _SKU_RE.search(b.text)
-        if m and len(m.group(0)) < 10:
+    # --- Артикул ---
+    id_sku = ""
+    for text in all_texts:
+        m = _SKU_RE.search(text)
+        if m and 6 <= len(m.group(0)) <= 9:
             id_sku = m.group(0)
             break
 
-    # Дата печати
-    for b in bot_boxes:
-        m = _DATE_RE.search(b.text)
+    # --- Дата ---
+    print_datetime = ""
+    for text in all_texts:
+        m = _DATE_RE.search(text)
         if m:
             print_datetime = m.group(0)
             break
 
-    # Код зоны
-    for b in bot_boxes:
-        m = _CODE_RE.search(b.text)
+    # --- Код зоны ---
+    code = "нет"
+    for text in all_texts:
+        m = _CODE_RE.search(text)
         if m:
             code = m.group(0)
             break
 
-    # Специальные символы К/Л/Ш
-    for b in boxes:
-        m = _SPECIAL_RE.search(b.text)
+    # --- Специальные символы ---
+    special_symbols = "нет"
+    for text in all_texts:
+        m = _SPECIAL_RE.search(text)
         if m:
-            special_symbols = m.group(0).upper()
+            special_symbols = m.group(1).upper()
             break
 
-    # additional_info — тексты, которые не попали ни в одну категорию
-    used_texts = {product_name, barcode, id_sku, print_datetime, code}
-    extra = [b.text for b in boxes if b.text not in used_texts and len(b.text) > 5]
-    if extra:
-        additional_info = " | ".join(extra[:3])
+    # --- additional_info ---
+    used = {barcode, id_sku, print_datetime}
+    extra = [b.text for b in boxes if b.text not in used and len(b.text) > 5 and b.conf > 0.5]
+    additional_info = " | ".join(extra[:2]) if extra else "нет"
 
     return PriceTag(
         filename=filename,

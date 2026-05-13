@@ -27,18 +27,20 @@ def process_video(
     interval_ms: int,
     min_hits: int,
     adaptive: bool,
+    detector_name: str,
 ) -> tuple[str | None, pd.DataFrame, str]:
     """Обработать загруженное видео, вернуть (csv_path, preview_df, status)."""
     if video_path is None:
         return None, pd.DataFrame(), "Видео не загружено"
 
     try:
-        logger.info("Обработка %s", Path(video_path).name)
+        logger.info("Обработка %s (детектор: %s)", Path(video_path).name, detector_name)
         df = pipeline.run(
             video_path,
             interval_ms=int(interval_ms),
             adaptive=bool(adaptive),
             min_hits=int(min_hits),
+            detector_name=detector_name,
         )
 
         if df.empty:
@@ -73,6 +75,12 @@ def build_app() -> gr.Blocks:
                 video_input = gr.Video(label="Видео (.mp4)", height=300)
 
                 with gr.Accordion("Параметры", open=False):
+                    detector_radio = gr.Radio(
+                        choices=["yolo-ft", "mser", "yolo"],
+                        value="yolo-ft",
+                        label="Детектор",
+                        info="yolo-ft = дообученный YOLO (рекомендуется), mser = без обучения",
+                    )
                     interval_slider = gr.Slider(
                         minimum=100,
                         maximum=2000,
@@ -101,7 +109,7 @@ def build_app() -> gr.Blocks:
 
         run_btn.click(
             fn=process_video,
-            inputs=[video_input, interval_slider, min_hits_slider, adaptive_check],
+            inputs=[video_input, interval_slider, min_hits_slider, adaptive_check, detector_radio],
             outputs=[csv_output, table_output, status_box],
         )
 

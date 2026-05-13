@@ -50,6 +50,10 @@ runs/
 *.onnx
 *.pkl
 
+# Pseudo-label dataset (большой, не трекаем в git)
+data/pseudo/
+models/*.pt
+
 # Misc
 *.zip
 *.tar.gz
