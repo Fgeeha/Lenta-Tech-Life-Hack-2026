@@ -1,6 +1,6 @@
 # Полка под контролем — Lenta Tech Life Hack 2026
 
-**Демо (без авторизации) → https://huggingface.co/spaces/lenta-hack/shelf-control**
+**Демо (без авторизации) → https://huggingface.co/spaces/fgeeha/shelf-control**
 
 📊 **metric@80% = 0.013** · детекция **157/157** · 3 размеченных видео
 
