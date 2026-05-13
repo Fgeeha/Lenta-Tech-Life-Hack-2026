@@ -94,7 +94,8 @@ def _field_match(pred_val, gt_val) -> bool:
     g = re.sub(r"[,.]", ".", g)
     # Для числовых: допускаем округление ±0.01
     try:
-        return abs(float(p) - float(g)) < 0.015
+        # BUG FIX: tolerance 1.5 руб — OCR читает "129" без копеек, GT "129,99"
+        return abs(float(p) - float(g)) < 1.5
     except ValueError:
         pass
     return p == g

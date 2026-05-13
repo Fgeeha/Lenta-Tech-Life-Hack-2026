@@ -1,11 +1,10 @@
 """Маппинг OCR-боксов → поля ценника.
 
 После поворота 90°CCW структура ценника (сверху вниз в кропе):
-  - Белая зона: product_name, id_sku, print_datetime, barcode, QR-код
+  - Белая зона:    product_name, id_sku, print_datetime, barcode, QR-код
   - Оранжевая зона: price_card (крупно), price_default (мелко), discount_amount
 
-Парсинг: сначала ищем числовые паттерны (цены, штрихкоды),
-затем текстовые (название, скидка).
+Парсинг: сначала discount (чтобы исключить % из цен), затем цены, затем текст.
 """
 
 import re
@@ -17,20 +16,68 @@ import numpy as np
 from shelf.schema import PriceTag
 
 # --- Регулярные выражения ---
-# Цена: 129, 129.99, 129,99  (от 2 до 6 цифр, опционально дробная часть)
+
+# Цена: 129, 129.99, 129,99
 _PRICE_RE = re.compile(r"\b(\d{2,6})(?:[.,](\d{2}))?\b")
+
+# Скидка: -48%  -23%  48%  23%  (знак минуса опционален — OCR часто не читает)
+# Диапазон 1–99% (не 100+), чтобы не захватить коды и артикулы
+_DISCOUNT_PCT_RE = re.compile(r"[-–]?\s*(\d{1,2})\s*%")
+
 # Дата: 03.04.2026 3:08
 _DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}")
-# Штрихкод EAN: 8-14 цифр подряд
+
+# Штрихкод EAN: 8-14 цифр
 _BARCODE_RE = re.compile(r"\b\d{8,14}\b")
-# Артикул SKU: 6-10 цифр (не EAN)
-_SKU_RE = re.compile(r"\b\d{6,10}\b")
-# Скидка: -48%  или  -23%
-_DISCOUNT_PCT_RE = re.compile(r"[-–]\s*(\d{1,2})\s*%")
+
+# Артикул SKU: 6-9 цифр (не EAN)
+_SKU_RE = re.compile(r"\b\d{6,9}\b")
+
 # Специальный символ: К, Л, Ш
 _SPECIAL_RE = re.compile(r"\b([КкЛлШш])\b")
+
 # Код зоны: 13_043015
 _CODE_RE = re.compile(r"\b\d{2}_\d{6,}\b")
+
+# Паттерн «число+процент» — для фильтрации из ценового парсинга
+_PCT_TOKEN_RE = re.compile(r"\d+\s*%")
+
+
+def _strip_percent_tokens(text: str) -> str:
+    """Удалить токены 'NN%' из строки перед поиском цен.
+
+    BUG FIX: раньше '48%' давало price=48 вместо discount=48%.
+    """
+    return _PCT_TOKEN_RE.sub(" ", text)
+
+
+def _extract_prices(texts: list[str]) -> list[float]:
+    """Извлечь числа, похожие на цены (исключая проценты)."""
+    prices = []
+    for text in texts:
+        clean = _strip_percent_tokens(text)
+        for m in _PRICE_RE.finditer(clean):
+            integer = int(m.group(1))
+            frac = int(m.group(2)) if m.group(2) else 0
+            val = integer + frac / 100.0
+            # Разумный диапазон: 1 — 99999 руб.
+            if 1.0 <= val <= 99_999.0:
+                prices.append(val)
+    return sorted(prices)
+
+
+def _find_discount(texts: list[str]) -> str:
+    """Найти скидку в виде '−XX%' или 'XX%'.
+
+    BUG FIX: раньше требовался знак минуса, но OCR часто читает '48%' без него.
+    """
+    for text in texts:
+        m = _DISCOUNT_PCT_RE.search(text)
+        if m:
+            pct = int(m.group(1))
+            if 1 <= pct <= 99:
+                return f"-{pct}%"
+    return "нет"
 
 
 def _find_orange_rows(img: np.ndarray) -> tuple[int, int]:
@@ -43,22 +90,8 @@ def _find_orange_rows(img: np.ndarray) -> tuple[int, int]:
     threshold = img.shape[1] * 0.15
     orange_rows = np.where(row_sums > threshold)[0]
     if len(orange_rows) == 0:
-        # Нет оранжевого → берём нижние 40% как ценовую зону
         return int(img.shape[0] * 0.6), img.shape[0]
     return max(0, int(orange_rows[0]) - 10), min(img.shape[0], int(orange_rows[-1]) + 10)
-
-
-def _extract_prices(texts: list[str]) -> list[float]:
-    """Извлечь все числа, похожие на цены."""
-    prices = []
-    for text in texts:
-        for m in _PRICE_RE.finditer(text):
-            integer = int(m.group(1))
-            frac = int(m.group(2)) if m.group(2) else 0
-            val = integer + frac / 100.0
-            if 1.0 <= val <= 99999.0:
-                prices.append(val)
-    return sorted(prices)
 
 
 @dataclass
@@ -83,6 +116,11 @@ def _normalize_box(box: list, w: int, h: int) -> tuple[float, float, float, floa
     xs = [p[0] for p in box]
     ys = [p[1] for p in box]
     return min(xs) / w, min(ys) / h, max(xs) / w, max(ys) / h
+
+
+def _fmt_price(val: float) -> str:
+    """Форматировать цену как строку '129,00'."""
+    return f"{val:.2f}".replace(".", ",")
 
 
 def parse_ocr_result(
@@ -126,9 +164,8 @@ def parse_ocr_result(
     boxes.sort(key=lambda b: b.center_y)
     all_texts = [b.text for b in boxes]
 
-    # --- Оранжевая зона (ценовая секция) ---
-    # После 90°CCW в препроцессированном кропе оранжевая зона = нижняя часть
-    price_zone_start = 0.5  # нижние 50% по умолчанию
+    # --- Зоны ---
+    price_zone_start = 0.5
     if crop is not None:
         oy0, oy1 = _find_orange_rows(crop)
         price_zone_start = oy0 / max(1, crop.shape[0])
@@ -136,34 +173,46 @@ def parse_ocr_result(
     price_boxes = [b for b in boxes if b.center_y >= price_zone_start]
     info_boxes = [b for b in boxes if b.center_y < price_zone_start]
 
-    # --- Цены ---
+    # --- 1. Скидка (сначала! чтобы исключить % из ценового парсинга) ---
+    discount_amount = _find_discount(all_texts)
+
+    # --- 2. Цены ---
+    # Ищем в ценовой зоне сначала, потом во всём тексте
+    price_texts = [b.text for b in price_boxes]
+    prices_orange = _extract_prices(price_texts)
+    prices_all = _extract_prices(all_texts)
+
     price_card = ""
     price_default = ""
-    all_prices = _extract_prices([b.text for b in price_boxes] + all_texts)
 
-    if len(all_prices) >= 2:
-        price_card = f"{all_prices[0]:.2f}".replace(".", ",")
-        price_default = f"{all_prices[-1]:.2f}".replace(".", ",")
-    elif len(all_prices) == 1:
-        price_card = f"{all_prices[0]:.2f}".replace(".", ",")
+    # Оранжевая зона содержит price_card (крупно) и обычно price_default (мелко)
+    # После фильтрации %: ожидаем числа типа [129, 252]
+    if len(prices_orange) >= 2:
+        # Меньшая = card (акционная), большая = default (без карты)
+        price_card = _fmt_price(prices_orange[0])
+        price_default = _fmt_price(prices_orange[-1])
+    elif len(prices_orange) == 1:
+        price_card = _fmt_price(prices_orange[0])
+        # Ищем default в белой зоне (там он может быть тоже)
+        prices_info = _extract_prices([b.text for b in info_boxes])
+        if prices_info:
+            candidate = max(prices_info)
+            if candidate > prices_orange[0]:
+                price_default = _fmt_price(candidate)
+    elif len(prices_all) >= 1:
+        # Фоллбек: берём из всего текста
+        price_card = _fmt_price(prices_all[0])
+        if len(prices_all) >= 2:
+            price_default = _fmt_price(prices_all[-1])
 
-    # --- Скидка ---
-    discount_amount = "нет"
-    for text in all_texts:
-        m = _DISCOUNT_PCT_RE.search(text)
-        if m:
-            discount_amount = f"-{m.group(1)}%"
-            break
-
-    # --- Название продукта ---
+    # --- 3. Название продукта ---
     product_name = ""
     if info_boxes:
-        # Берём боксы с наибольшим conf и размером из информационной зоны
         name_candidates = [b for b in info_boxes if len(b.text) > 3 and b.conf > 0.5]
         if name_candidates:
             product_name = " ".join(b.text for b in name_candidates[:4])
 
-    # --- Штрихкод ---
+    # --- 4. Штрихкод ---
     barcode = ""
     for text in all_texts:
         m = _BARCODE_RE.search(text)
@@ -171,15 +220,17 @@ def parse_ocr_result(
             barcode = m.group(0)
             break
 
-    # --- Артикул ---
+    # --- 5. Артикул ---
     id_sku = ""
     for text in all_texts:
         m = _SKU_RE.search(text)
-        if m and 6 <= len(m.group(0)) <= 9:
-            id_sku = m.group(0)
-            break
+        if m:
+            candidate = m.group(0)
+            if 6 <= len(candidate) <= 9 and candidate not in barcode:
+                id_sku = candidate
+                break
 
-    # --- Дата ---
+    # --- 6. Дата ---
     print_datetime = ""
     for text in all_texts:
         m = _DATE_RE.search(text)
@@ -187,7 +238,7 @@ def parse_ocr_result(
             print_datetime = m.group(0)
             break
 
-    # --- Код зоны ---
+    # --- 7. Код зоны ---
     code = "нет"
     for text in all_texts:
         m = _CODE_RE.search(text)
@@ -195,7 +246,7 @@ def parse_ocr_result(
             code = m.group(0)
             break
 
-    # --- Специальные символы ---
+    # --- 8. Специальные символы ---
     special_symbols = "нет"
     for text in all_texts:
         m = _SPECIAL_RE.search(text)
@@ -203,7 +254,7 @@ def parse_ocr_result(
             special_symbols = m.group(1).upper()
             break
 
-    # --- additional_info ---
+    # --- 9. additional_info ---
     used = {barcode, id_sku, print_datetime}
     extra = [b.text for b in boxes if b.text not in used and len(b.text) > 5 and b.conf > 0.5]
     additional_info = " | ".join(extra[:2]) if extra else "нет"
