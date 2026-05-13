@@ -4,6 +4,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+import cv2
 import gradio as gr
 import pandas as pd
 
@@ -21,6 +22,16 @@ _PREVIEW_COLS = [
     "frame_timestamp",
 ]
 
+_MAX_DURATION_SEC = 90  # лимит для HF Spaces CPU
+
+
+def _video_duration(path: str) -> float:
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    n = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+    return n / fps if fps > 0 else 0.0
+
 
 def process_video(
     video_path: str | None,
@@ -28,37 +39,49 @@ def process_video(
     min_hits: int,
     adaptive: bool,
     detector_name: str,
+    progress: gr.Progress = gr.Progress(),
 ) -> tuple[str | None, pd.DataFrame, str]:
     """Обработать загруженное видео, вернуть (csv_path, preview_df, status)."""
     if video_path is None:
         return None, pd.DataFrame(), "Видео не загружено"
 
+    dur = _video_duration(video_path)
+    warn = ""
+    if dur > _MAX_DURATION_SEC:
+        warn = f"Видео {dur:.0f}с > лимита {_MAX_DURATION_SEC}с — обрабатываем первые {_MAX_DURATION_SEC}с.\n"
+        logger.warning("Video %.0fs > limit %ds, truncating", dur, _MAX_DURATION_SEC)
+
     try:
+        progress(0, desc="Инициализация детектора и OCR...")
         logger.info("Обработка %s (детектор: %s)", Path(video_path).name, detector_name)
+
+        progress(0.1, desc="Сэмплирование кадров и детекция...")
         df = pipeline.run(
             video_path,
             interval_ms=int(interval_ms),
             adaptive=bool(adaptive),
             min_hits=int(min_hits),
             detector_name=detector_name,
+            max_duration_sec=_MAX_DURATION_SEC,
         )
 
+        progress(0.9, desc="Сохранение CSV...")
         if df.empty:
-            return None, pd.DataFrame(), "Ценники не найдены"
+            return None, pd.DataFrame(), warn + "Ценники не найдены"
 
-        # Сохраняем CSV
         tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False, prefix="shelf_")
         df.to_csv(tmp.name, index=False)
 
-        # Превью
         preview_cols = [c for c in _PREVIEW_COLS if c in df.columns]
         preview = df[preview_cols].head(50)
 
         status_msg = (
-            f"Найдено {len(df)} уникальных ценников.\n"
+            warn
+            + f"Найдено {len(df)} уникальных ценников.\n"
             f"Строк с price_card: {(df.price_card != '').sum()}\n"
             f"Строк с barcode: {(df.barcode != '').sum()}"
         )
+        progress(1.0, desc="Готово")
         return tmp.name, preview, status_msg
 
     except Exception as exc:
@@ -68,7 +91,11 @@ def process_video(
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="Полка под контролем", theme=gr.themes.Soft()) as app:
-        gr.Markdown("# Полка под контролем\n" "Загрузи видео с робота-сканера → получи CSV с распознанными ценниками.")
+        gr.Markdown(
+            "# Полка под контролем\n"
+            "Загрузи видео с робота-сканера Lenta → получи CSV с распознанными ценниками.\n\n"
+            f"> Лимит на HF Spaces CPU: первые **{_MAX_DURATION_SEC} секунд** видео."
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -79,14 +106,15 @@ def build_app() -> gr.Blocks:
                         choices=["yolo-tiled", "yolo-ft", "mser", "yolo"],
                         value="yolo-tiled",
                         label="Детектор",
-                        info="yolo-tiled = тайловый YOLO 4K (рекомендуется), yolo-ft = full-frame YOLO, mser = без обучения",
+                        info="yolo-tiled = тайловый YOLO 4K (рекомендуется), mser = без обучения",
                     )
                     interval_slider = gr.Slider(
-                        minimum=100,
+                        minimum=200,
                         maximum=2000,
-                        value=200,
+                        value=500,
                         step=100,
                         label="Интервал семплирования (мс)",
+                        info="500мс — баланс скорость/качество на CPU",
                     )
                     min_hits_slider = gr.Slider(
                         minimum=1,
@@ -98,7 +126,7 @@ def build_app() -> gr.Blocks:
                     adaptive_check = gr.Checkbox(value=True, label="Адаптивный семплинг (пропуск статики)")
 
                 run_btn = gr.Button("Запустить распознавание", variant="primary", size="lg")
-                status_box = gr.Textbox(label="Статус", lines=3, interactive=False)
+                status_box = gr.Textbox(label="Статус", lines=4, interactive=False)
 
             with gr.Column(scale=2):
                 csv_output = gr.File(label="Скачать CSV")
@@ -118,8 +146,9 @@ def build_app() -> gr.Blocks:
             "**Поля CSV:** filename, product_name, price_default, price_card, "
             "price_discount, barcode, discount_amount, id_sku, print_datetime, "
             "code, additional_info, color, special_symbols, frame_timestamp, "
-            "x_min, y_min, x_max, y_max + 11 QR-полей\n\n"
-            "_Lenta Tech Life Hack 2026_"
+            "x_min, y_min, x_max, y_max + QR-поля\n\n"
+            "**metric@80% = 0.013** на 3 размеченных видео · детекция 157/157 · "
+            "[GitHub](https://github.com/nkolesnikov/Lenta-Tech-Life-Hack-2026)"
         )
 
     return app

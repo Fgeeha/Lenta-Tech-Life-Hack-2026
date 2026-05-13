@@ -81,12 +81,14 @@ def run(
     min_hits: int = 2,
     output_csv: str | Path | None = None,
     detector_name: str = "mser",
+    max_duration_sec: float | None = None,
 ) -> pd.DataFrame:
     """Обработать видео → вернуть DataFrame по схеме OUTPUT_COLUMNS.
 
     Args:
         video_path: путь к .mp4 файлу
         interval_ms: интервал семплирования кадров (мс)
+        max_duration_sec: обрабатывать не более N секунд видео (для HF Spaces)
         adaptive: пропускать статичные кадры (оптический поток)
         min_hits: минимум кадров для трека (фильтр ложных срабатываний)
         output_csv: если задан — сохранить CSV по этому пути
@@ -101,7 +103,11 @@ def run(
     logger.info("Запуск пайплайна: %s", filename)
     frame_count = 0
 
+    max_ts = max_duration_sec * 1000.0 if max_duration_sec else None
     for ts, frame in sample_frames(video_path, interval_ms=interval_ms, adaptive=adaptive):
+        if max_ts is not None and ts > max_ts:
+            logger.info("Достигнут лимит %.0fс — остановка сэмплирования", max_duration_sec)
+            break
         dets = detector.detect(frame)
         tracker.update(dets, frame, ts)
         frame_count += 1
