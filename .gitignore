@@ -52,9 +52,7 @@ runs/
 
 # Pseudo-label dataset (большой, не трекаем в git)
 data/pseudo/
-# Деплой-веса трекаем (HF Spaces, ~6 MB)
 models/*.pt
-!models/pricetag_tiled_yolov8n.pt
 
 # Misc
 *.zip

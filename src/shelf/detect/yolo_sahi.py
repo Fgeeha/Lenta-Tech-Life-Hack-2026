@@ -19,6 +19,29 @@ logger = logging.getLogger(__name__)
 TILE_SIZE = 640
 STRIDE = 512          # overlap = 128px
 TILED_WEIGHTS = "models/pricetag_tiled_yolov8n.pt"
+HF_MODEL_REPO = "fgeeha/shelf-pricetag-yolov8n"
+HF_MODEL_FILE = "pricetag_tiled_yolov8n.pt"
+
+
+def _ensure_weights(path: str) -> str:
+    """Скачать веса с HF Hub если локального файла нет (для HF Spaces)."""
+    p = Path(path)
+    if p.exists():
+        return path
+    try:
+        from huggingface_hub import hf_hub_download
+        logger.info("Скачиваем веса с HF Hub: %s", HF_MODEL_REPO)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        downloaded = hf_hub_download(
+            repo_id=HF_MODEL_REPO,
+            filename=HF_MODEL_FILE,
+            local_dir=str(p.parent),
+        )
+        logger.info("Веса скачаны: %s", downloaded)
+        return downloaded
+    except Exception as exc:
+        logger.warning("HF Hub скачивание не удалось: %s → фоллбек на yolov8n.pt", exc)
+        return "yolov8n.pt"
 
 
 class YOLOSahiDetector:
@@ -42,10 +65,7 @@ class YOLOSahiDetector:
     def _load(self) -> None:
         from ultralytics import YOLO
 
-        w = Path(self.weights)
-        if not w.exists():
-            logger.warning("Веса не найдены: %s → фоллбек на yolov8n.pt", w)
-            self.weights = "yolov8n.pt"
+        self.weights = _ensure_weights(self.weights)
         self._model = YOLO(self.weights)
         logger.info("YOLOSahi загружен: %s", self.weights)
 
