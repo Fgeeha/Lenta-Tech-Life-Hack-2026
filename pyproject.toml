@@ -2,7 +2,7 @@
 name = "shelf"
 version = "0.1.0"
 description = "Shelf Under Control — price tag recognition pipeline"
-authors = ["lenta-hack <lenta-hack@local>"]
+authors = ["nkolesnikov <33605615+Fgeeha@users.noreply.github.com>"]
 readme = "README.md"
 packages = [{include = "shelf", from = "src"}]
 

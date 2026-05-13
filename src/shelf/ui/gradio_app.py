@@ -142,7 +142,7 @@ def build_app() -> gr.Blocks:
             "code, additional_info, color, special_symbols, frame_timestamp, "
             "x_min, y_min, x_max, y_max + QR-поля\n\n"
             "**metric@80% = 0.013** на 3 размеченных видео · детекция 157/157 · "
-            "[GitHub](https://github.com/nkolesnikov/Lenta-Tech-Life-Hack-2026)"
+            "[GitHub](https://github.com/Fgeeha/Lenta-Tech-Life-Hack-2026)"
         )
 
     return app

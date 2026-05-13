@@ -2,7 +2,7 @@
 
 ## Ссылка
 
-https://huggingface.co/spaces/lenta-hack/shelf-control
+https://huggingface.co/spaces/fgeeha/shelf-control
 
 ## Воспроизведение деплоя
 
@@ -18,7 +18,7 @@ Visibility: Public
 ### 2. Добавить remote и запушить
 
 ```bash
-git remote add hf https://huggingface.co/spaces/lenta-hack/shelf-control
+git remote add hf https://huggingface.co/spaces/fgeeha/shelf-control
 git push hf Master:main
 ```
 

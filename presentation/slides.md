@@ -16,8 +16,8 @@ style: |
 **Автоматическое распознавание ценников с видео робота-сканера**
 
 ---
-**Демо:** https://huggingface.co/spaces/lenta-hack/shelf-control
-**Репо:** https://github.com/nkolesnikov/Lenta-Tech-Life-Hack-2026
+**Демо:** https://huggingface.co/spaces/Fgeeha/shelf-control
+**Репо:** https://github.com/Fgeeha/Lenta-Tech-Life-Hack-2026
 
 ---
 
@@ -134,7 +134,7 @@ baseline MSER         →  metric=0.000  avg_field=0.091
 
 ## Демо UI
 
-**https://huggingface.co/spaces/lenta-hack/shelf-control**
+**https://huggingface.co/spaces/fgeeha/shelf-control**
 
 - Загрузи `.mp4` → нажми «Запустить» → получи CSV
 - Первые 90 сек видео (CPU basic, free tier)
@@ -162,15 +162,15 @@ baseline MSER         →  metric=0.000  avg_field=0.091
 
 ## Ссылки
 
-| | |
-|---|---|
-| **Демо** | https://huggingface.co/spaces/lenta-hack/shelf-control |
-| **Репо** | https://github.com/nkolesnikov/Lenta-Tech-Life-Hack-2026 |
-| **Метрики** | docs/METRICS.md |
-| **Деплой** | docs/DEPLOYMENT.md |
+| |                                                     |
+|---|-----------------------------------------------------|
+| **Демо** | https://huggingface.co/spaces/fgeeha/shelf-control  |
+| **Репо** | https://github.com/fgeeha/Lenta-Tech-Life-Hack-2026 |
+| **Метрики** | docs/METRICS.md                                     |
+| **Деплой** | docs/DEPLOYMENT.md                                  |
 
 ```
-git clone https://github.com/nkolesnikov/Lenta-Tech-Life-Hack-2026
+git clone https://github.com/fgeeha/Lenta-Tech-Life-Hack-2026
 cd Lenta-Tech-Life-Hack-2026
 poetry install && python app.py
 ```
