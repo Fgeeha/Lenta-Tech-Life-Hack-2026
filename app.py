@@ -1,6 +1,11 @@
 """Entry point for Gradio / Hugging Face Spaces."""
 
 import logging
+import os
+import sys
+
+# src/ layout: add to path for HF Spaces (no pip install -e .)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from shelf.ui.gradio_app import build_app
 
