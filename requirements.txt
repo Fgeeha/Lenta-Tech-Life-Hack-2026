@@ -1,3 +1,5 @@
+paddlepaddle>=3.0.0
+paddleocr>=2.10.0
 aiofiles==23.2.1 ; python_version >= "3.10" and python_version < "4.0"
 albucore==0.0.24 ; python_full_version > "3.10.0" and python_version < "4.0"
 albumentations==2.0.8 ; python_full_version > "3.10.0" and python_version < "4.0"
