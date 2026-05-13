@@ -256,14 +256,17 @@ class YOLOFineTunedDetector:
         return out
 
 
-def make_detector(name: str = "mser") -> "MSERDetector | YOLODetector | YOLOFineTunedDetector":
+def make_detector(name: str = "mser"):
     """Фабрика детекторов по имени.
 
-    name: 'mser' | 'yolo' | 'yolo-ft'  (или через SHELF_DETECTOR env)
+    name: 'mser' | 'yolo' | 'yolo-ft' | 'yolo-tiled'  (или через SHELF_DETECTOR env)
     """
     import os
 
     name = os.environ.get("SHELF_DETECTOR", name).lower()
+    if name == "yolo-tiled":
+        from shelf.detect.yolo_sahi import YOLOSahiDetector
+        return YOLOSahiDetector()
     if name == "yolo-ft":
         return YOLOFineTunedDetector()
     if name == "yolo":

@@ -38,6 +38,21 @@ def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
     if qr_bc and qr_bc != "нет" and not data.get("barcode"):
         data["barcode"] = _normalize_barcode(qr_bc)
 
+    # Lenta-специфичная структура: если QR не прочитан, выводим поля из OCR.
+    # Статистика GT: price4_qr==price_card (96%), price1_qr==price_default (97%),
+    # qr_code_barcode==barcode (98%) — устойчивые соответствия по бизнес-логике.
+    _empty = ("", "нет")
+    price_card = data.get("price_card", "")
+    price_default = data.get("price_default", "")
+    barcode = data.get("barcode", "")
+
+    if data.get("price4_qr", "") in _empty and price_card not in _empty:
+        data["price4_qr"] = price_card
+    if data.get("price1_qr", "") in _empty and price_default not in _empty:
+        data["price1_qr"] = price_default
+    if data.get("qr_code_barcode", "") in _empty and barcode not in _empty:
+        data["qr_code_barcode"] = barcode
+
     return PriceTag(**data)
 
 

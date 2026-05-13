@@ -108,18 +108,27 @@ def decode_qr(crop: np.ndarray) -> dict[str, str]:
 
     # Пробуем несколько разрешений — QR читается лучше при определённом масштабе
     results: dict[str, str] = {}
-    for scale in [1.0, 2.0, 0.5]:
+    for scale in [1.0, 2.0, 3.0, 0.5]:
         if scale != 1.0:
             h, w = crop.shape[:2]
             resized = cv2.resize(crop, (max(1, int(w * scale)), max(1, int(h * scale))))
         else:
             resized = crop
 
-        for raw in _try_pyzbar(resized) + _try_opencv(resized):
-            parsed = parse_qr_url(raw)
-            if parsed:
-                results.update(parsed)
-                return results  # нашли — выходим
+        # Также пробуем grayscale + OTSU для улучшения читаемости QR/штрихкода
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if resized.ndim == 3 else resized
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh_bgr = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+
+        for img_variant in [resized, thresh_bgr]:
+            for raw in _try_pyzbar(img_variant) + _try_opencv(img_variant):
+                # EAN-13 / штрихкод: pyzbar возвращает голые цифры, не URL
+                if raw.isdigit() and 8 <= len(raw) <= 15:
+                    return {"qr_code_barcode": raw}
+                parsed = parse_qr_url(raw)
+                if parsed:
+                    results.update(parsed)
+                    return results  # нашли — выходим
 
     return results
 

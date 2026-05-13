@@ -76,10 +76,10 @@ def build_app() -> gr.Blocks:
 
                 with gr.Accordion("Параметры", open=False):
                     detector_radio = gr.Radio(
-                        choices=["yolo-ft", "mser", "yolo"],
-                        value="yolo-ft",
+                        choices=["yolo-tiled", "yolo-ft", "mser", "yolo"],
+                        value="yolo-tiled",
                         label="Детектор",
-                        info="yolo-ft = дообученный YOLO (рекомендуется), mser = без обучения",
+                        info="yolo-tiled = тайловый YOLO 4K (рекомендуется), yolo-ft = full-frame YOLO, mser = без обучения",
                     )
                     interval_slider = gr.Slider(
                         minimum=100,

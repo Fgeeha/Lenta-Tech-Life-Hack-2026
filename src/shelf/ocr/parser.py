@@ -30,8 +30,9 @@ _DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}")
 # Штрихкод EAN: 8-14 цифр
 _BARCODE_RE = re.compile(r"\b\d{8,14}\b")
 
-# Артикул SKU: 6-9 цифр (не EAN)
-_SKU_RE = re.compile(r"\b\d{6,9}\b")
+# Артикул SKU: 10-12 цифр (Lenta article: 12 цифр, например 270207736530)
+# Специально не пересекается с EAN-13 (13 цифр)
+_SKU_RE = re.compile(r"\b\d{10,12}\b")
 
 # Специальный символ: К, Л, Ш
 _SPECIAL_RE = re.compile(r"\b([КкЛлШш])\b")
@@ -226,7 +227,7 @@ def parse_ocr_result(
         m = _SKU_RE.search(text)
         if m:
             candidate = m.group(0)
-            if 6 <= len(candidate) <= 9 and candidate not in barcode:
+            if candidate != barcode and candidate not in barcode:
                 id_sku = candidate
                 break
 
