@@ -53,7 +53,25 @@ def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
     if data.get("qr_code_barcode", "") in _empty and barcode not in _empty:
         data["qr_code_barcode"] = barcode
 
+    # Деривация discount_amount из двух цен.
+    # Lenta GT всегда хранит скидку как "-NN%" (int floor, не round).
+    # Формула верифицирована по всем трём GT-видео.
+    if data.get("discount_amount", "") in _empty:
+        pc = _safe_float(price_card)
+        pd = _safe_float(price_default)
+        if pc and pd and pd > pc > 0:
+            pct = int((1 - pc / pd) * 100)
+            if 1 <= pct <= 99:
+                data["discount_amount"] = f"-{pct}%"
+
     return PriceTag(**data)
+
+
+def _safe_float(val: str) -> float | None:
+    try:
+        return float(str(val).replace(",", "."))
+    except (ValueError, TypeError):
+        return None
 
 
 def _normalize_barcode(raw: str) -> str:
