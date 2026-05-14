@@ -46,6 +46,14 @@ def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
     price_default = data.get("price_default", "")
     barcode = data.get("barcode", "")
 
+    # Обратная деривация: QR дал price1_qr, но OCR не прочитал price_default.
+    # price1_qr ≡ price_default в 97% GT-строк.
+    if price_default in _empty:
+        p1_qr = data.get("price1_qr", "")
+        if p1_qr not in _empty:
+            data["price_default"] = p1_qr
+            price_default = p1_qr
+
     if data.get("price4_qr", "") in _empty and price_card not in _empty:
         data["price4_qr"] = price_card
     if data.get("price1_qr", "") in _empty and price_default not in _empty:
@@ -56,6 +64,7 @@ def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
     # Деривация discount_amount из двух цен.
     # Lenta GT всегда хранит скидку как "-NN%" (int floor, не round).
     # Формула верифицирована по всем трём GT-видео.
+    # Используем обновлённый price_default (может прийти из price1_qr).
     if data.get("discount_amount", "") in _empty:
         pc = _safe_float(price_card)
         pd = _safe_float(price_default)
