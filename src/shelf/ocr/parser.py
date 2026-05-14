@@ -127,6 +127,56 @@ def _fmt_price(val: float) -> str:
     return f"{val:.2f}".replace(".", ",")
 
 
+_CYR_RE = re.compile(r"[а-яА-ЯёЁ]")
+
+
+def _preprocess_name_zone(crop_raw: np.ndarray, scale: int = 3) -> np.ndarray:
+    """Light preprocessing for Russian product-name OCR.
+
+    Rotates 90°CCW (same orientation as the main pipeline) and applies
+    a gentle upscale — no CLAHE or sharpening to avoid OCR artifacts.
+    """
+    img = cv2.rotate(crop_raw, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    if scale > 1:
+        h, w = img.shape[:2]
+        img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_LANCZOS4)
+    return img
+
+
+def _extract_name_ru(
+    crop_raw: np.ndarray, ocr_ru: "OCREngine", name_end_frac: float
+) -> str:
+    """Russian OCR on the white/name zone using the original (raw) crop.
+
+    Uses gentle preprocessing (rotate + 3× upscale, no CLAHE/sharpening)
+    to avoid OCR artifacts from aggressive processing.
+    name_end_frac is the orange zone start fraction (from processed crop).
+    """
+    proc = _preprocess_name_zone(crop_raw)
+    H = proc.shape[0]
+    safe_frac = max(0.35, min(name_end_frac, 0.72))
+    zone_h = int(H * safe_frac)
+    zone = proc[:zone_h, :]
+    if zone.size == 0 or zone.shape[0] < 10:
+        return ""
+    lines = ocr_ru.run(zone)
+    scored: list[tuple[float, str]] = []
+    for box_pts, text, conf in lines:
+        text = text.strip()
+        if conf < 0.25 or len(text) < 2:
+            continue
+        if not (_CYR_RE.search(text) or len(text) > 5):
+            continue
+        xs = [p[0] for p in box_pts]
+        ys = [p[1] for p in box_pts]
+        area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+        scored.append((area * conf, text))
+    if not scored:
+        return ""
+    scored.sort(reverse=True)
+    return " ".join(t for _, t in scored[:6])[:300]
+
+
 def parse_ocr_result(
     ocr_lines: list[tuple[list, str, float]],
     crop: "np.ndarray | None" = None,
@@ -134,11 +184,14 @@ def parse_ocr_result(
     frame_timestamp: float = 0.0,
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0),
     color: str = "red",
+    ocr_ru: "OCREngine | None" = None,
+    crop_raw: "np.ndarray | None" = None,
 ) -> PriceTag:
     """Извлечь поля ценника из OCR-результатов.
 
-    crop — препроцессированный (90°CCW + upscale) кроп, используется
-    для нахождения оранжевой зоны (ценовой секции).
+    crop     — препроцессированный (90°CCW + upscale) кроп, для orange zone.
+    crop_raw — исходный (не обработанный) кроп, для Russian OCR product_name.
+    ocr_ru   — опциональный RU-движок для извлечения product_name.
     """
     x_min, y_min, x_max, y_max = bbox
     crop_h = max(1, y_max - y_min)
@@ -211,7 +264,14 @@ def parse_ocr_result(
 
     # --- 3. Название продукта ---
     product_name = ""
-    if info_boxes:
+    # Приоритет: Russian OCR на raw-кропе (gentle preprocessing)
+    if ocr_ru is not None and crop_raw is not None:
+        product_name = _extract_name_ru(crop_raw, ocr_ru, price_zone_start)
+    elif ocr_ru is not None and crop is not None:
+        # Фоллбек: processed crop (хуже качество для RU OCR)
+        product_name = _extract_name_ru(crop, ocr_ru, price_zone_start)
+    # Фоллбек: EN-боксы из белой зоны (числа, коды и тп отсеиваются)
+    if not product_name and info_boxes:
         name_candidates = [b for b in info_boxes if len(b.text) > 3 and b.conf > 0.5]
         if name_candidates:
             product_name = " ".join(b.text for b in name_candidates[:4])
@@ -235,7 +295,45 @@ def parse_ocr_result(
                     barcode = repaired
                     break
 
-    # Fallback B: ROI-таргетинг штрихкода через Sobel + pyzbar
+    # Fallback C: пространственная склейка цифровых боксов
+    # Штрихкод часто бьётся OCR на 2-4 фрагмента ("4607" "124143" "901")
+    if not barcode:
+        digit_boxes = [b for b in boxes if re.fullmatch(r"\d+", b.text)]
+        # Группируем по горизонтальной полосе (±3% высоты)
+        row_tol = 0.03
+        rows: list[list[OCRBox]] = []
+        for db in sorted(digit_boxes, key=lambda b: b.center_y):
+            placed = False
+            for row in rows:
+                if abs(db.center_y - row[0].center_y) < row_tol:
+                    row.append(db)
+                    placed = True
+                    break
+            if not placed:
+                rows.append([db])
+        for row in rows:
+            row.sort(key=lambda b: b.x0)
+            concat = "".join(b.text for b in row)
+            if 11 <= len(concat) <= 15:
+                repaired = ean13_repair(concat)
+                if repaired:
+                    barcode = repaired
+                    break
+            # Попробуем sliding window по частям строки
+            for start in range(len(concat)):
+                for end in range(start + 11, min(start + 16, len(concat) + 1)):
+                    chunk = concat[start:end]
+                    if 11 <= len(chunk) <= 15:
+                        repaired = ean13_repair(chunk)
+                        if repaired:
+                            barcode = repaired
+                            break
+                if barcode:
+                    break
+            if barcode:
+                break
+
+    # Fallback D: ROI-таргетинг штрихкода через Sobel + pyzbar
     if not barcode and crop is not None:
         barcode = read_barcode_from_strip(crop)
 

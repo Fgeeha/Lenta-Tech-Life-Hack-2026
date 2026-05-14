@@ -34,6 +34,7 @@ def _extract_tag(
     filename: str,
     timestamp: float,
     ocr_engine: OCREngine,
+    ocr_engine_ru: OCREngine | None = None,
 ) -> PriceTag:
     """Обработать кроп ценника: OCR + QR → PriceTag.
 
@@ -64,10 +65,12 @@ def _extract_tag(
     ocr_tag = parse_ocr_result(
         ocr_lines,
         crop=proc,
+        crop_raw=crop_raw,
         filename=filename,
         frame_timestamp=timestamp,
         bbox=(x_min, y_min, x_max, y_max),
         color=color,
+        ocr_ru=ocr_engine_ru,
     )
 
     # --- Мерж QR + OCR ---
@@ -99,6 +102,7 @@ def run(
     detector = make_detector(detector_name)
     tracker = Tracker(min_hits=min_hits)
     ocr_engine = OCREngine()
+    ocr_engine_ru = OCREngine(lang="ru", force_easyocr=True)
 
     logger.info("Запуск пайплайна: %s", filename)
     frame_count = 0
@@ -131,6 +135,7 @@ def run(
             filename=filename,
             timestamp=state.best_ts,
             ocr_engine=ocr_engine,
+            ocr_engine_ru=ocr_engine_ru,
         )
         tags.append(tag)
 

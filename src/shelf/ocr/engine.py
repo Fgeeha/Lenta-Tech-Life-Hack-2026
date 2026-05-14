@@ -11,25 +11,31 @@ logger = logging.getLogger(__name__)
 
 
 class OCREngine:
-    """PaddleOCR EN → EasyOCR fallback (HF Spaces / Python 3.13 compat)."""
+    """PaddleOCR EN → EasyOCR fallback (HF Spaces / Python 3.13 compat).
 
-    def __init__(self, lang: str = "en") -> None:
+    force_easyocr=True skips PaddleOCR and uses EasyOCR directly.
+    Useful for Russian product names where PaddleOCR-RU underperforms.
+    """
+
+    def __init__(self, lang: str = "en", force_easyocr: bool = False) -> None:
         self.lang = lang
+        self.force_easyocr = force_easyocr
         self._ocr = None
         self._backend = None  # "paddle" | "easyocr"
 
     def _load(self) -> None:
-        # Пробуем PaddleOCR (лучшее качество для чисел)
-        try:
-            from paddleocr import PaddleOCR
-            self._ocr = PaddleOCR(use_angle_cls=True, lang=self.lang, show_log=False)
-            self._backend = "paddle"
-            logger.info("OCR backend: PaddleOCR (lang=%s)", self.lang)
-            return
-        except Exception as exc:
-            logger.warning("PaddleOCR недоступен (%s), переключаемся на EasyOCR", exc)
+        if not self.force_easyocr:
+            # Пробуем PaddleOCR (лучшее качество для чисел и EN)
+            try:
+                from paddleocr import PaddleOCR
+                self._ocr = PaddleOCR(use_angle_cls=True, lang=self.lang, show_log=False)
+                self._backend = "paddle"
+                logger.info("OCR backend: PaddleOCR (lang=%s)", self.lang)
+                return
+            except Exception as exc:
+                logger.warning("PaddleOCR недоступен (%s), переключаемся на EasyOCR", exc)
 
-        # Фоллбек: EasyOCR (работает на Python 3.13)
+        # EasyOCR — лучше для RU продуктовых названий
         import easyocr
         langs = ["ru", "en"] if self.lang == "ru" else ["en"]
         self._ocr = easyocr.Reader(langs, verbose=False)

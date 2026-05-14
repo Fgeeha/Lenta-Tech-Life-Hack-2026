@@ -82,7 +82,16 @@ def _norm_bc(val) -> str:
     return s
 
 
-def _field_match(pred_val, gt_val) -> bool:
+def _token_overlap(a: str, b: str) -> float:
+    """Jaccard similarity on word tokens (case-insensitive)."""
+    ta = set(re.findall(r"\w+", a.lower()))
+    tb = set(re.findall(r"\w+", b.lower()))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _field_match(pred_val, gt_val, field: str = "") -> bool:
     p = str(pred_val).strip().lower()
     g = str(gt_val).strip().lower()
     if g in ("нет", "nan", ""):
@@ -96,10 +105,17 @@ def _field_match(pred_val, gt_val) -> bool:
         return abs(float(p) - float(g)) < 1.5
     except ValueError:
         pass
-    return p == g
+    if p == g:
+        return True
+    # Fuzzy match for long text fields (product_name, additional_info)
+    if field in ("product_name", "additional_info") and len(g) > 10:
+        return _token_overlap(p, g) >= 0.40
+    return False
 
 
-def _extract_one(frame: cv2.Mat, row: pd.Series, ocr: OCREngine) -> dict:
+def _extract_one(
+    frame: cv2.Mat, row: pd.Series, ocr: OCREngine, ocr_ru: OCREngine | None
+) -> dict:
     """OCR + parse на одном GT-bbox. Возвращает dict поле→значение."""
     x1, y1, x2, y2 = int(row.x_min), int(row.y_min), int(row.x_max), int(row.y_max)
     h, w = frame.shape[:2]
@@ -127,16 +143,20 @@ def _extract_one(frame: cv2.Mat, row: pd.Series, ocr: OCREngine) -> dict:
     ocr_tag = parse_ocr_result(
         ocr_lines,
         crop=proc,
+        crop_raw=crop_raw,
         filename=str(row.get("filename", "")),
         frame_timestamp=float(row.get("frame_timestamp", 0)) / 1000.0,
         bbox=(x1, y1, x2, y2),
         color=color,
+        ocr_ru=ocr_ru,
     )
     merged = merge(ocr_tag, qr_fields)
     return merged.__dict__
 
 
-def eval_video(name: str, video_path: Path, csv_path: Path, ocr: OCREngine) -> dict:
+def eval_video(
+    name: str, video_path: Path, csv_path: Path, ocr: OCREngine, ocr_ru: OCREngine | None
+) -> dict:
     gt_df = _normalize_gt(pd.read_csv(csv_path, decimal=","))
     cap = cv2.VideoCapture(str(video_path))
 
@@ -152,13 +172,13 @@ def eval_video(name: str, video_path: Path, csv_path: Path, ocr: OCREngine) -> d
             scores.append(0.0)
             continue
 
-        pred = _extract_one(frame, gt_row, ocr)
+        pred = _extract_one(frame, gt_row, ocr, ocr_ru)
 
         correct = 0
         for field in EVAL_FIELDS:
             gt_val = gt_row.get(field, "")
             pred_val = pred.get(field, "")
-            ok = _field_match(pred_val, gt_val)
+            ok = _field_match(pred_val, gt_val, field=field)
             if ok:
                 correct += 1
                 field_hits[field] += 1
@@ -178,7 +198,8 @@ def eval_video(name: str, video_path: Path, csv_path: Path, ocr: OCREngine) -> d
 
 
 def main() -> None:
-    ocr = OCREngine()
+    ocr = OCREngine()                               # EN/PaddleOCR: цифры, цены
+    ocr_ru = OCREngine(lang="ru", force_easyocr=True)  # EasyOCR RU+EN: названия
     results = []
     all_field_acc: dict[str, list[float]] = {f: [] for f in EVAL_FIELDS}
 
@@ -187,7 +208,7 @@ def main() -> None:
             logger.warning("Пропуск %s — файл не найден", name)
             continue
         logger.warning("Обрабатываем %s...", name)
-        r = eval_video(name, video_path, csv_path, ocr)
+        r = eval_video(name, video_path, csv_path, ocr, ocr_ru)
         results.append(r)
         for f in EVAL_FIELDS:
             all_field_acc[f].append(r["field_accuracy"][f])
