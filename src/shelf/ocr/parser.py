@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from shelf.qr.barcode_roi import ean13_repair, read_barcode_from_strip
 from shelf.schema import PriceTag
 
 # --- Регулярные выражения ---
@@ -220,8 +221,23 @@ def parse_ocr_result(
     for text in all_texts:
         m = _BARCODE_RE.search(text)
         if m and len(m.group(0)) >= 10:
-            barcode = m.group(0)
+            cand = m.group(0)
+            barcode = ean13_repair(cand) or cand
             break
+
+    # Fallback A: длинные цифровые последовательности из OCR + EAN-13 repair
+    if not barcode:
+        for text in all_texts:
+            digits = re.sub(r"\D", "", text)
+            if 11 <= len(digits) <= 15:
+                repaired = ean13_repair(digits)
+                if repaired:
+                    barcode = repaired
+                    break
+
+    # Fallback B: ROI-таргетинг штрихкода через Sobel + pyzbar
+    if not barcode and crop is not None:
+        barcode = read_barcode_from_strip(crop)
 
     # --- 5. Артикул ---
     id_sku = ""

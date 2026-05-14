@@ -28,8 +28,10 @@ logger = logging.getLogger(__name__)
 DATA_ROOT = Path("Данные")
 LABELED = [
     ("25_12-20", DATA_ROOT / "25_12-20" / "25_12-20.mp4", DATA_ROOT / "25_12-20" / "25_12-20.csv"),
+    ("25_2-10", DATA_ROOT / "25_2-10" / "25_2-10.mp4", DATA_ROOT / "25_2-10" / "25_2-10.csv"),
     ("26_12-20", DATA_ROOT / "26_12-20" / "26_12-20.mp4", DATA_ROOT / "26_12-20" / "26_12-20.csv"),
     ("43_15", DATA_ROOT / "43_15" / "43_15.mp4", DATA_ROOT / "43_15" / "43_15.csv"),
+    ("49_5", DATA_ROOT / "49_5" / "49_5.mp4", DATA_ROOT / "49_5" / "49_5.csv"),
 ]
 
 EVAL_FIELDS = [
@@ -50,9 +52,17 @@ EVAL_FIELDS = [
 def _normalize_gt(df: pd.DataFrame) -> pd.DataFrame:
     if "wholesale_level_1_coun" in df.columns:
         df = df.rename(columns={"wholesale_level_1_coun": "wholesale_level_1_count"})
+    # Strip trailing spaces from filename (43_15 GT has "43_15.mp4 ")
+    if "filename" in df.columns:
+        df["filename"] = df["filename"].str.strip()
     for col in ["barcode", "qr_code_barcode"]:
         if col in df.columns:
             df[col] = df[col].apply(_norm_bc)
+    # Strip embedded spaces from id_sku (49_5 GT has "360108 699851")
+    if "id_sku" in df.columns:
+        df["id_sku"] = df["id_sku"].apply(
+            lambda v: re.sub(r"\s+", "", str(v).strip()) if pd.notna(v) else ""
+        )
     return df
 
 
@@ -60,6 +70,8 @@ def _norm_bc(val) -> str:
     if pd.isna(val):
         return ""
     s = str(val).strip()
+    # 49_5 GT stores barcodes with spaces: "4 607124 143901"
+    s = re.sub(r"\s+", "", s)
     try:
         if "." in s:
             s = str(int(float(s)))

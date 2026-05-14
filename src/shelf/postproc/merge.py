@@ -75,12 +75,12 @@ def _safe_float(val: str) -> float | None:
 
 
 def _normalize_barcode(raw: str) -> str:
-    """Нормализовать штрихкод: убрать .0, lpad до 13 цифр."""
+    """Нормализовать штрихкод: убрать пробелы/.0, lpad до 13 цифр."""
     try:
-        raw = raw.strip()
+        import re
+        raw = re.sub(r"\s+", "", raw.strip())
         if "." in raw:
             raw = str(int(float(raw)))
-        raw = raw.replace(" ", "")
         if raw.isdigit() and len(raw) < 13:
             raw = raw.zfill(13)
         return raw
