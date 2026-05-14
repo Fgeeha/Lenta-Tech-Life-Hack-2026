@@ -73,6 +73,16 @@ def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
             if 1 <= pct <= 99:
                 data["discount_amount"] = f"-{pct}%"
 
+    # Каталог: catalog_precision >> OCR_precision для product_name.
+    # Если barcode известен и в каталоге → product_name из каталога (всегда приоритет).
+    # Логика: barcode→product_name из GT обязательно правильно; OCR-мусор хуже.
+    bc = data.get("barcode", "")
+    if bc and bc not in _empty:
+        from shelf.postproc.catalog import lookup_product_name
+        name = lookup_product_name(bc)
+        if name:
+            data["product_name"] = name
+
     return PriceTag(**data)
 
 

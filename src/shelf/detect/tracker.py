@@ -14,6 +14,9 @@ from shelf.detect.detector import Detection
 logger = logging.getLogger(__name__)
 
 
+_TOP_FRAMES_K = 5  # keep top-K frames per track for multi-frame fusion
+
+
 @dataclass
 class TrackState:
     """Состояние одного трека (ценника)."""
@@ -24,6 +27,10 @@ class TrackState:
     best_frame: "np.ndarray | None" = field(default=None, repr=False)
     best_ts: float = 0.0
     n_seen: int = 0  # сколько кадров трек был активен
+    # Top-K frames sorted descending by score for multi-frame fusion
+    top_frames: "list[tuple[float, np.ndarray, float]]" = field(
+        default_factory=list, repr=False
+    )
 
 
 def _sharpness(crop: np.ndarray) -> float:
@@ -88,21 +95,33 @@ class Tracker:
             det = Detection(x_min=x1, y_min=y1, x_max=x2, y_max=y2, confidence=conf, cls_name="tag")
             results.append((int(tid), det))
 
-            # Обновляем лучший кадр для трека
+            # Обновляем лучший кадр и top-K для трека
             crop = frame[max(0, y1) : y2, max(0, x1) : x2]
             score = det.area * _sharpness(crop)
 
-            if tid not in self._states or score > self._states[tid].best_score:
+            old = self._states.get(tid)
+            old_n = old.n_seen if old else 0
+            old_top = list(old.top_frames) if old else []
+
+            # Accumulate top-K frames (score descending)
+            if crop.size > 0:
+                old_top.append((score, crop.copy(), timestamp))
+                old_top.sort(key=lambda x: -x[0])
+                old_top = old_top[:_TOP_FRAMES_K]
+
+            if old is None or score > old.best_score:
                 self._states[tid] = TrackState(
                     track_id=int(tid),
                     best_det=det,
                     best_score=score,
                     best_frame=crop.copy() if crop.size > 0 else None,
                     best_ts=timestamp,
-                    n_seen=self._states.get(tid, TrackState(int(tid), det)).n_seen + 1,
+                    n_seen=old_n + 1,
+                    top_frames=old_top,
                 )
             else:
-                self._states[tid].n_seen += 1
+                old.n_seen += 1
+                old.top_frames = old_top
 
         return results
 

@@ -11,6 +11,7 @@ from shelf.detect.detector import make_detector
 from shelf.detect.tracker import Tracker
 from shelf.io.video import sample_frames
 from shelf.io.writer import write_csv
+from shelf.mfsr.align_blend import align_and_blend
 from shelf.ocr.engine import OCREngine
 from shelf.ocr.parser import parse_ocr_result
 from shelf.ocr.preprocess import preprocess_crop
@@ -126,8 +127,15 @@ def run(
         if state.best_frame is None:
             continue
         d = state.best_det
+
+        # Multi-frame fusion: align top-K frames and blend for sharper OCR input
+        if len(state.top_frames) > 1:
+            fused = align_and_blend(state.top_frames)
+        else:
+            fused = state.best_frame
+
         tag = _extract_tag(
-            crop_raw=state.best_frame,
+            crop_raw=fused,
             x_min=d.x_min,
             y_min=d.y_min,
             x_max=d.x_max,
