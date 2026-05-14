@@ -137,7 +137,7 @@ def _extract_one(
             break
 
     color = classify_color(crop_raw)
-    proc = preprocess_crop(crop_raw, rotate_180=True, deskew=True, upscale=5, sharpen=True, clahe=True)
+    proc = preprocess_crop(crop_raw, rotate_180=True, deskew=True, upscale=2, sharpen=False, clahe=False)
     ocr_lines = ocr.run(proc)
 
     ocr_tag = parse_ocr_result(

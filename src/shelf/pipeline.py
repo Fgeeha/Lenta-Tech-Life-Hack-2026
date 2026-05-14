@@ -58,7 +58,7 @@ def _extract_tag(
     color = classify_color(crop_raw)
 
     # --- OCR ---
-    proc = preprocess_crop(crop_raw, rotate_180=True, deskew=True, upscale=3, sharpen=True, clahe=True)
+    proc = preprocess_crop(crop_raw, rotate_180=True, deskew=True, upscale=2, sharpen=False, clahe=False)
     ocr_lines = ocr_engine.run(proc)
 
     # --- Парсинг полей ---
