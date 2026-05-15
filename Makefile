@@ -1,50 +1,95 @@
-.PHONY: install run eval test format poetry-install poetry-run poetry-eval poetry-test poetry-format docker-build docker-run poetry-run-eval-on-labeled
+.PHONY: help install poetry-install \
+        run poetry-run \
+        test poetry-test \
+        format poetry-format \
+        eval poetry-eval \
+        ceiling poetry-ceiling \
+        catalog poetry-catalog \
+        docker-build docker-run
 
-install:  ## install runtime/dev dependencies with pip
+# ── default ───────────────────────────────────────────────────────────────────
+help:  ## show this help
+	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) \
+	  | awk 'BEGIN{FS=":.*##"}{printf "  %-28s %s\n", $$1, $$2}'
+
+# ── install ───────────────────────────────────────────────────────────────────
+install:  ## pip install runtime/dev deps
 	pip install -r requirements.txt
 
-run:  ## start Gradio UI
+poetry-install:  ## poetry install (ml + ocr + dev groups)
+	poetry install --with ml,ocr,dev
+
+# ── run UI ───────────────────────────────────────────────────────────────────
+run:  ## start Gradio UI (plain python)
 	PYTHONPATH=src python app.py
 
-eval:  ## run metric evaluation on labeled videos
-	PYTHONPATH=src python scripts/eval_on_labeled.py
+poetry-run:  ## start Gradio UI (poetry)
+	PYTHONPATH=src poetry run python app.py
 
-test:  ## run tests
+# ── tests ─────────────────────────────────────────────────────────────────────
+test:  ## run test suite (plain python)
 	PYTHONPATH=src pytest -q
 
-format:  ## ruff fix + black
+poetry-test:  ## run test suite (poetry)
+	PYTHONPATH=src poetry run pytest -q
+
+# ── formatting ────────────────────────────────────────────────────────────────
+format:  ## ruff + black (plain python)
 	ruff check --fix .
 	black .
 
-docker-build:  ## build Docker image
-	docker build -t shelf .
-
-docker-run:  ## run Docker container
-	docker run -p 7860:7860 shelf
-
-poetry-install:  ## poetry install (all groups)
-	poetry install --with ml,ocr,dev
-
-poetry-run:  ## запустить Gradio UI
-	poetry run python app.py
-
-poetry-eval:  ## прогон метрики по размеченным видео
-	poetry run python scripts/eval_on_labeled.py
-
-poetry-test:  ## запустить тесты
-	poetry run pytest -q
-
-poetry-format:  ## ruff fix + black
+poetry-format:  ## ruff + black (poetry)
 	poetry run ruff check --fix .
 	poetry run black .
 
-poetry-run-eval-on-labeled: ## poetry run python scripts/eval_on_labeled.py
-	 PYTHONPATH=src poetry run python scripts/eval_on_labeled.py \
+# ── ceiling eval (GT bboxes — diagnostic only) ────────────────────────────────
+ceiling:  ## ceiling eval with GT bboxes (plain python)
+	PYTHONPATH=src python scripts/eval_ceiling.py \
+	  --data-root Данные \
+	  --ocr-engine auto \
+	  --json-out reports/ceiling_latest.json \
+	  --append-metrics
+
+poetry-ceiling:  ## ceiling eval with GT bboxes (poetry)
+	PYTHONPATH=src poetry run python scripts/eval_ceiling.py \
+	  --data-root Данные \
+	  --ocr-engine auto \
+	  --json-out reports/ceiling_latest.json \
+	  --append-metrics
+
+# ── full pipeline eval ────────────────────────────────────────────────────────
+eval:  ## full pipeline eval on labeled videos (plain python)
+	PYTHONPATH=src python scripts/eval_on_labeled.py \
 	  --data-root Данные \
 	  --interval-ms 250 \
 	  --detector hybrid \
 	  --ocr-engine auto \
 	  --ocr-top-k 3 \
-	  --reports-dir reports/eval_stage4 \
-	  --json-out reports/eval_stage4.json \
+	  --reports-dir reports/eval_latest \
+	  --json-out reports/eval_latest.json \
 	  --append-metrics
+
+poetry-eval:  ## full pipeline eval on labeled videos (poetry)
+	PYTHONPATH=src poetry run python scripts/eval_on_labeled.py \
+	  --data-root Данные \
+	  --interval-ms 250 \
+	  --detector hybrid \
+	  --ocr-engine auto \
+	  --ocr-top-k 3 \
+	  --reports-dir reports/eval_latest \
+	  --json-out reports/eval_latest.json \
+	  --append-metrics
+
+# ── catalog ───────────────────────────────────────────────────────────────────
+catalog:  ## rebuild local SKU catalog from labeled GT CSVs (plain python)
+	PYTHONPATH=src python scripts/build_catalog.py Данные --out data/catalog.csv
+
+poetry-catalog:  ## rebuild local SKU catalog from labeled GT CSVs (poetry)
+	PYTHONPATH=src poetry run python scripts/build_catalog.py Данные --out data/catalog.csv
+
+# ── docker ────────────────────────────────────────────────────────────────────
+docker-build:  ## build Docker image
+	docker build -t shelf .
+
+docker-run:  ## run Docker container on port 7860
+	docker run -p 7860:7860 shelf
