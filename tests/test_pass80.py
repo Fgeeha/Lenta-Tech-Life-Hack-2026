@@ -38,6 +38,39 @@ def test_pass80_swaps_inverted_prices():
     assert out.price_default == "120,00"
 
 
+def test_pass80_reverse_fills_price1_and_price4_from_ocr():
+    tag = PriceTag(price_default="252,63", price_card="129,99")
+    out, changes = optimize_tag(tag)
+    assert out.price1_qr == "252.63"
+    assert out.price4_qr == "129.99"
+    assert any(c.field == "price1_qr" for c in changes)
+    assert any(c.field == "price4_qr" for c in changes)
+
+
+def test_pass80_derives_price2_qr_5pct():
+    tag = PriceTag(price_default="252,63")
+    out, changes = optimize_tag(tag)
+    # price2_qr should be 252.63 * 0.95 = 239.9985 → within 1.5 of GT 239.99
+    import math
+    derived = float(out.price2_qr)
+    assert abs(derived - 252.63 * 0.95) < 0.01
+    assert any(c.field == "price2_qr" for c in changes)
+
+
+def test_pass80_sync_barcode_to_qr_default_on():
+    tag = PriceTag(barcode="4607124143901")
+    out, changes = optimize_tag(tag)
+    assert out.qr_code_barcode == "4607124143901"
+    assert any(c.field == "qr_code_barcode" for c in changes)
+
+
+def test_pass80_no_price2_qr_when_already_filled():
+    tag = PriceTag(price_default="252,63", price2_qr="239.99")
+    out, changes = optimize_tag(tag)
+    assert out.price2_qr == "239.99"
+    assert not any(c.field == "price2_qr" for c in changes)
+
+
 def test_pass80_report_counts_proxy_crossing(tmp_path):
     tag = PriceTag(
         product_name="Молоко",
