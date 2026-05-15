@@ -17,9 +17,11 @@ from shelf.ocr.engine import OCREngine
 from shelf.ocr.parser import parse_ocr_result
 from shelf.ocr.preprocess import ocr_variants
 from shelf.ocr.template import classify_color
+from shelf.postproc.catalog import apply_catalog, load_catalog_from_env
 from shelf.postproc.dedup import deduplicate_tags, tag_completeness
 from shelf.postproc.merge import merge
-from shelf.qr.decoder import decode_qr
+from shelf.postproc.voting import merge_candidate_tags
+from shelf.qr.decoder import decode_barcode, decode_qr
 from shelf.schema import OUTPUT_COLUMNS, PriceTag
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,9 @@ def _extract_tag(
         return base
 
     qr_fields = decode_qr(crop_raw)
+    linear_barcode = decode_barcode(crop_raw)
+    if linear_barcode and not qr_fields.get("barcode"):
+        qr_fields["barcode"] = linear_barcode
     color = classify_color(crop_raw)
 
     best_tag: PriceTag | None = None
@@ -117,6 +122,7 @@ def run(
     max_duration_sec: float | None = None,
     ocr_top_k: int = 2,
     max_ocr_variants: int = 2,
+    ocr_engine_name: str | None = None,
     debug_dir: str | Path | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> pd.DataFrame:
@@ -133,7 +139,7 @@ def run(
         crop_margin=_CROP_MARGIN,
         max_candidates=max(1, ocr_top_k),
     )
-    ocr_engine = OCREngine()
+    ocr_engine = OCREngine(engine=ocr_engine_name)
     ocr_engine_ru = OCREngine(lang="ru", force_easyocr=True)
 
     logger.info("Запуск пайплайна: %s detector=%s", filename, detector_name)
@@ -212,7 +218,9 @@ def run(
                 max_ocr_variants=max_ocr_variants,
             )
             candidate_tags.append(tag)
-        best = max(candidate_tags, key=tag_completeness)
+        best = merge_candidate_tags(
+            candidate_tags, candidate_scores=[c.score for c in candidates]
+        )
         tags.append(best)
         if progress_callback and len(best_tracks) > 0:
             _progress(
@@ -222,6 +230,8 @@ def run(
 
     # Trackers can split one physical tag; merge duplicate rows conservatively.
     tags = deduplicate_tags(tags)
+    # Optional local catalog lookup from data/catalog.csv or SHELF_CATALOG_PATH.
+    tags = apply_catalog(tags, load_catalog_from_env())
     df = prepare_output_dataframe(
         pd.DataFrame([t.to_dict() for t in tags], columns=OUTPUT_COLUMNS)
     )

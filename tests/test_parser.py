@@ -88,3 +88,36 @@ def test_valid_ean13_barcode_is_extracted():
     lines = _fake_ocr(["4607124143901", "129", "252"])
     tag = parse_ocr_result(lines, bbox=(0, 0, 200, 200))
     assert tag.barcode == "4607124143901"
+
+
+# --- Price extraction hardening ---
+
+
+def test_extract_prices_handles_dash_cents():
+    assert 129.99 in _extract_prices(["129-99"])
+
+
+def test_extract_prices_handles_thousands_with_comma():
+    assert 1299.99 in _extract_prices(["1 299,99"])
+
+
+def test_extract_prices_ignores_small_item_count():
+    assert _extract_prices(["от 2 шт"]) == []
+
+
+def test_parse_prices_uses_card_and_default_context():
+    lines = [
+        (
+            [[0.1, 0.62], [0.5, 0.62], [0.5, 0.70], [0.1, 0.70]],
+            "цена без карты 252,63",
+            0.95,
+        ),
+        (
+            [[0.1, 0.78], [0.7, 0.78], [0.7, 0.92], [0.1, 0.92]],
+            "по карте 129-99",
+            0.95,
+        ),
+    ]
+    tag = parse_ocr_result(lines, bbox=(0, 0, 200, 200))
+    assert tag.price_card == "129,99"
+    assert tag.price_default == "252,63"

@@ -22,14 +22,16 @@ from shelf.qr.barcode_roi import (
     read_barcode_from_strip,
 )
 from shelf.schema import ABSENT_VALUE, PriceTag
+from shelf.validation import normalize_sku
 
 if TYPE_CHECKING:
     from shelf.ocr.engine import OCREngine
 # --- Regexes -----------------------------------------------------------------
 
-# Prices such as 129, 129.99, 1 299,99. Percent tokens are removed before matching.
+# Prices such as 129, 129.99, 1 299,99 and OCR form 129-99.
+# Percent tokens are removed before matching.
 _PRICE_RE = re.compile(
-    r"(?<!\d)(\d{1,3}(?:[\s\u00a0]?\d{3})+|\d{1,6})(?:[.,](\d{1,2}))?(?!\d)"
+    r"(?<!\d)(\d{1,3}(?:[\s\u00a0]?\d{3})+|\d{1,6})(?:[.,-](\d{1,2}))?(?!\d)"
 )
 _DISCOUNT_PCT_RE = re.compile(r"[-–−]?\s*(\d{1,2})\s*%")
 _DISCOUNT_RUB_RE = re.compile(
@@ -95,19 +97,29 @@ class PriceCandidate:
     text: str
     score: float
     box: OCRBox | None = None
+    context: str = ""
 
 
 # --- Low-level normalizers ----------------------------------------------------
 
 
 def _numeric_text(text: str) -> str:
-    """Fix common OCR substitutions only for numeric-looking strings."""
+    """Fix OCR substitutions only inside numeric-looking tokens.
+
+    Applying the translation to an entire line turns Russian words such as
+    ``без`` into ``бе3`` and creates fake prices.  We therefore translate only
+    whitespace-delimited tokens that already contain a digit or numeric symbol.
+    """
     if not text:
         return ""
-    # Apply translation when the token already contains digits or price-like separators.
-    if re.search(r"\d|[.,:%₽]", text):
-        return text.translate(_NUMERIC_OCR_TRANSLATION)
-    return text
+
+    def repl(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if re.search(r"\d|[.,:%₽]", token):
+            return token.translate(_NUMERIC_OCR_TRANSLATION)
+        return token
+
+    return re.sub(r"\S+", repl, text)
 
 
 def _strip_percent_tokens(text: str) -> str:
@@ -233,34 +245,138 @@ def _normalize_box(
     )
 
 
+def _line_contexts(boxes: list[OCRBox], y_tol: float = 0.045) -> dict[int, str]:
+    """Return text line context for each OCR box index."""
+    indexed = sorted(
+        enumerate(boxes), key=lambda item: (item[1].center_y, item[1].center_x)
+    )
+    groups: list[list[tuple[int, OCRBox]]] = []
+    for idx, box in indexed:
+        if (
+            not groups
+            or abs(box.center_y - _group_center_y(groups[-1])) > y_tol
+        ):
+            groups.append([(idx, box)])
+        else:
+            groups[-1].append((idx, box))
+    contexts: dict[int, str] = {}
+    for group in groups:
+        group.sort(key=lambda item: item[1].center_x)
+        context = " ".join(box.text for _, box in group)
+        for idx, _ in group:
+            contexts[idx] = context
+    return contexts
+
+
+def _group_center_y(group: list[tuple[int, OCRBox]]) -> float:
+    return sum(box.center_y for _, box in group) / max(1, len(group))
+
+
+def _price_context_multiplier(text: str, context: str, value: float) -> float:
+    """Boost/penalize price candidates using nearby OCR words."""
+    ctx = f"{text} {context}".lower().replace("ё", "е")
+    mult = 1.0
+    if re.search(r"₽|\bруб", ctx):
+        mult *= 1.15
+    if re.search(r"по\s+карт|карт[аеуы]", ctx) and not re.search(
+        r"без\s+карт", ctx
+    ):
+        mult *= 1.45
+    if re.search(r"акци|скид|выгод", ctx):
+        mult *= 1.30
+    if re.search(r"без\s+карт|обыч|регуляр|старая", ctx):
+        mult *= 1.25
+    if re.search(r"\bот\s+\d+|опт|шт\.?", ctx) and value <= 10:
+        mult *= 0.25
+    # Unit/count tokens around tiny numbers are usually not prices.
+    if value <= 10 and re.search(r"\b(шт|кг|г|л)\b", ctx):
+        mult *= 0.25
+    return mult
+
+
 def _extract_price_candidates(boxes: list[OCRBox]) -> list[PriceCandidate]:
     candidates: list[PriceCandidate] = []
-    for b in boxes:
+    contexts = _line_contexts(boxes)
+    for idx, b in enumerate(boxes):
         vals = _extract_prices([b.text])
+        context = contexts.get(idx, b.text)
         for val in vals:
+            base_score = max(1e-6, b.area) * max(0.05, b.conf)
+            score = base_score * _price_context_multiplier(b.text, context, val)
             candidates.append(
                 PriceCandidate(
-                    value=val,
-                    text=b.text,
-                    score=max(1e-6, b.area) * max(0.05, b.conf),
-                    box=b,
+                    value=val, text=b.text, score=score, box=b, context=context
                 )
             )
     return candidates
 
 
+def _has_card_signal(c: PriceCandidate) -> bool:
+    ctx = f"{c.text} {c.context}".lower().replace("ё", "е")
+    return bool(
+        re.search(r"по\s+карт|карт[аеуы]|акци|выгод", ctx)
+        and not re.search(r"без\s+карт", ctx)
+    )
+
+
+def _has_default_signal(c: PriceCandidate) -> bool:
+    ctx = f"{c.text} {c.context}".lower().replace("ё", "е")
+    return bool(re.search(r"без\s+карт|обыч|регуляр|старая|цена\s+без", ctx))
+
+
 def _choose_prices(
     price_candidates: list[PriceCandidate], all_prices: list[float]
 ) -> tuple[str, str]:
-    """Return (price_card, price_default)."""
+    """Return (price_card, price_default).
+
+    The main signal is still geometry/size, but explicit OCR context ("по карте",
+    "без карты", "акция") wins when present.
+    """
     if price_candidates:
-        # If one candidate is much larger on the image, it is usually the card/action price.
         ordered_by_score = sorted(
             price_candidates, key=lambda c: c.score, reverse=True
         )
         values = sorted({round(c.value, 2) for c in price_candidates})
+
+        card_signal = sorted(
+            [c for c in price_candidates if _has_card_signal(c)],
+            key=lambda c: c.score,
+            reverse=True,
+        )
+        default_signal = sorted(
+            [c for c in price_candidates if _has_default_signal(c)],
+            key=lambda c: c.score,
+            reverse=True,
+        )
+        if card_signal:
+            card_val = card_signal[0].value
+            if default_signal:
+                default_val = default_signal[0].value
+            else:
+                higher = [v for v in values if v > card_val + 0.009]
+                default_val = (
+                    max(higher)
+                    if higher
+                    else (max(values) if len(values) > 1 else card_val)
+                )
+            return _fmt_price(card_val), (
+                _fmt_price(default_val)
+                if abs(default_val - card_val) > 0.009
+                else ""
+            )
+
+        if default_signal and len(values) >= 2:
+            default_val = default_signal[0].value
+            lower = [v for v in values if v < default_val - 0.009]
+            card_val = min(lower) if lower else min(values)
+            return _fmt_price(card_val), _fmt_price(default_val)
+
         if len(values) >= 2:
-            if ordered_by_score[0].score > ordered_by_score[1].score * 1.35:
+            # If one candidate is much larger on the image, it is usually the card/action price.
+            if (
+                len(ordered_by_score) > 1
+                and ordered_by_score[0].score > ordered_by_score[1].score * 1.35
+            ):
                 card_val = ordered_by_score[0].value
             else:
                 card_val = min(values)
@@ -364,16 +480,19 @@ def _extract_barcode(
 
 
 def _extract_sku(texts: Iterable[str], barcode: str = "") -> str:
+    """Extract strict Lenta SKU: 12 digits starting with 2.
+
+    A 12-digit SKU must never be upgraded to a barcode.  Shorter internal IDs
+    are intentionally left empty because they are not part of the required
+    ``id_sku`` contract used in the provided GT.
+    """
+    barcode_digits = re.sub(r"\D", "", str(barcode or ""))
     for text in texts:
         t = _numeric_text(text)
         for m in _SKU_RE.finditer(t):
-            digits = re.sub(r"\D", "", m.group(1))
-            if (
-                10 <= len(digits) <= 12
-                and digits != barcode
-                and digits not in barcode
-            ):
-                return digits
+            sku = normalize_sku(m.group(1))
+            if sku and sku != barcode_digits and sku not in barcode_digits:
+                return sku
     return ""
 
 

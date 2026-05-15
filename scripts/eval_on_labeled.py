@@ -1,50 +1,38 @@
-"""Этап 8 — оценка пайплайна на размеченных видео.
+"""Evaluate the full video pipeline on the locally available labeled videos.
 
-Метрика: доля ценников из GT, у которых ≥80% полей распознаны верно.
-
-Матчинг предсказаний с GT:
-1. По barcode (если оба есть)
-2. По IoU (bbox ≥ 0.1) + нечёткое совпадение product_name
-3. По временной близости (|ts_pred - ts_gt| < 2с) + IoU
-
-Для каждого матча: считаем долю верных полей (из EVAL_FIELDS).
-Финальная метрика = доля матчей с долей ≥ 0.8.
+The script is intentionally self-contained and robust to missing data: if the
+private challenge videos are not present in ``--data-root`` it exits cleanly and
+prints the exact paths that are missing.  Metrics are computed with the same
+matching idea used during the project: predictions are matched to GT rows by
+barcode/QR, IoU and timestamp proximity, then field-level correctness is scored.
 """
 
+from __future__ import annotations
+
 import argparse
+import json
 import logging
 import re
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+from typing import Any, Iterable
 
 import pandas as pd
 
 from shelf import pipeline
+from shelf.io.writer import prepare_output_dataframe
+from shelf.qr.barcode_roi import ean13_checksum_valid
+from shelf.schema import ABSENT_VALUE, COLUMN_ALIASES, OUTPUT_COLUMNS
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-DATA_ROOT = Path("Данные")
+DEFAULT_DATA_ROOT = Path("Данные")
+LABELED_NAMES = ["25_12-20", "25_2-10", "26_12-20", "43_15", "49_5"]
 
-LABELED = [
-    (
-        "25_12-20",
-        DATA_ROOT / "25_12-20" / "25_12-20.mp4",
-        DATA_ROOT / "25_12-20" / "25_12-20.csv",
-    ),
-    (
-        "26_12-20",
-        DATA_ROOT / "26_12-20" / "26_12-20.mp4",
-        DATA_ROOT / "26_12-20" / "26_12-20.csv",
-    ),
-    (
-        "43_15",
-        DATA_ROOT / "43_15" / "43_15.mp4",
-        DATA_ROOT / "43_15" / "43_15.csv",
-    ),
-]
-
-# Поля для оценки (исключаем координаты, timestamp и filename)
-EVAL_FIELDS = [
+# Historical compact metric, kept for comparability with previous project notes.
+COMPACT_EVAL_FIELDS = [
     "product_name",
     "price_default",
     "price_card",
@@ -58,229 +46,491 @@ EVAL_FIELDS = [
     "price4_qr",
 ]
 
+ALL_VALUE_FIELDS = [
+    c
+    for c in OUTPUT_COLUMNS
+    if c
+    not in {"filename", "frame_timestamp", "x_min", "y_min", "x_max", "y_max"}
+]
 
-def _normalize_gt(df: pd.DataFrame) -> pd.DataFrame:
-    """Нормализовать GT CSV: исправить опечатку имени столбца, decimal."""
-    if "wholesale_level_1_coun" in df.columns:
-        df = df.rename(
-            columns={"wholesale_level_1_coun": "wholesale_level_1_count"}
+
+@dataclass(frozen=True)
+class LabeledVideo:
+    """Paths for one labeled challenge video."""
+
+    name: str
+    video_path: Path
+    csv_path: Path
+
+
+def find_labeled_videos(
+    data_root: Path, names: Iterable[str] | None = None
+) -> list[LabeledVideo]:
+    """Return expected video/CSV pairs under ``data_root``."""
+    selected = list(names or LABELED_NAMES)
+    items: list[LabeledVideo] = []
+    for name in selected:
+        folder = data_root / name
+        items.append(
+            LabeledVideo(
+                name=name,
+                video_path=folder / f"{name}.mp4",
+                csv_path=folder / f"{name}.csv",
+            )
         )
-    # barcode как строка (в GT хранится как float)
+    return items
+
+
+def _to_text(val: Any) -> str:
+    if val is None:
+        return ""
+    try:
+        if val != val:  # NaN without importing numpy
+            return ""
+    except Exception:
+        pass
+    return str(val).strip()
+
+
+def _norm_digits(val: Any) -> str:
+    """Normalize a barcode-like value read by pandas as int/float/string."""
+    s = _to_text(val)
+    if not s or s.lower() == "nan" or s == ABSENT_VALUE:
+        return ""
+    s = s.replace("\u00a0", " ").strip()
+    try:
+        if re.fullmatch(r"\d+\.0", s):
+            s = str(int(float(s)))
+    except (ValueError, OverflowError):
+        pass
+    digits = re.sub(r"\D", "", s)
+    return digits
+
+
+def _norm_barcode(val: Any) -> str:
+    digits = _norm_digits(val)
+    if (
+        len(digits) == 14
+        and digits.endswith("0")
+        and ean13_checksum_valid(digits[:-1])
+    ):
+        return digits[:-1]
+    if len(digits) < 13 and digits:
+        return digits.zfill(13)
+    return digits
+
+
+def _norm_sku(val: Any) -> str:
+    digits = _norm_digits(val)
+    return digits
+
+
+def _to_float(val: Any, default: float = 0.0) -> float:
+    s = _to_text(val).replace("\u00a0", " ").replace(" ", "").replace(",", ".")
+    if not s or s == ABSENT_VALUE:
+        return default
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_gt(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize quirks in the provided GT CSV files."""
+    df = df.rename(
+        columns={c: COLUMN_ALIASES.get(c, c) for c in df.columns}
+    ).copy()
+    for col in OUTPUT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[OUTPUT_COLUMNS]
+    if "filename" in df.columns:
+        df["filename"] = df["filename"].apply(_to_text)
     for col in ["barcode", "qr_code_barcode"]:
-        if col in df.columns:
-            df[col] = df[col].apply(_norm_barcode)
+        df[col] = df[col].apply(_norm_barcode)
+    df["id_sku"] = df["id_sku"].apply(_norm_sku)
+    for col in ["frame_timestamp", "x_min", "y_min", "x_max", "y_max"]:
+        df[col] = df[col].apply(_to_float)
     return df
 
 
-def _norm_barcode(val) -> str:
-    if pd.isna(val):
-        return ""
-    s = str(val).strip()
-    try:
-        if "." in s:
-            s = str(int(float(s)))
-        s = s.zfill(max(len(s), 13)) if s.isdigit() else s
-    except (ValueError, OverflowError):
-        pass
-    return s
-
-
-def _iou(a: tuple, b: tuple) -> float:
+def _iou(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
-    ix = max(0, min(ax2, bx2) - max(ax1, bx1))
-    iy = max(0, min(ay2, by2) - max(ay1, by1))
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
     inter = ix * iy
-    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    union = (
+        max(0.0, (ax2 - ax1)) * max(0.0, (ay2 - ay1))
+        + max(0.0, (bx2 - bx1)) * max(0.0, (by2 - by1))
+        - inter
+    )
     return inter / union if union > 0 else 0.0
 
 
-def _field_match(pred_val, gt_val) -> bool:
-    """Проверить, совпадает ли предсказанное значение с GT."""
-    p = str(pred_val).strip().lower()
-    g = str(gt_val).strip().lower()
-    if g in ("нет", "nan", ""):
-        return True  # отсутствующие поля не штрафуем
-    if p in ("", "нет"):
+def _token_overlap(a: str, b: str) -> float:
+    ta = set(re.findall(r"[0-9a-zа-яё]+", a.lower(), flags=re.IGNORECASE))
+    tb = set(re.findall(r"[0-9a-zа-яё]+", b.lower(), flags=re.IGNORECASE))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _field_match(pred_val: Any, gt_val: Any, field: str = "") -> bool:
+    """Return whether a predicted field matches GT with task-specific tolerance."""
+    p = _to_text(pred_val).lower()
+    g = _to_text(gt_val).lower()
+    if g in ("", "nan", ABSENT_VALUE):
+        return True
+    if p in ("", "nan", ABSENT_VALUE):
         return False
-    # Для цен: нормализуем разделитель
-    p = re.sub(r"[,.]", ".", p)
-    g = re.sub(r"[,.]", ".", g)
-    # Для числовых: допускаем округление ±0.01
+
+    if field in {"barcode", "qr_code_barcode", "id_sku"}:
+        return _norm_digits(p) == _norm_digits(g)
+
+    p_num = re.sub(r"[,.]", ".", p.replace(" ", ""))
+    g_num = re.sub(r"[,.]", ".", g.replace(" ", ""))
     try:
-        # BUG FIX: tolerance 1.5 руб — OCR читает "129" без копеек, GT "129,99"
-        return abs(float(p) - float(g)) < 1.5
+        return abs(float(p_num) - float(g_num)) < 1.5
     except ValueError:
         pass
-    return p == g
+
+    if p == g:
+        return True
+    if field in {"product_name", "additional_info"} and len(g) > 10:
+        return _token_overlap(p, g) >= 0.40
+    return False
 
 
-def match_and_score(
-    pred_df: pd.DataFrame,
-    gt_df: pd.DataFrame,
-) -> dict:
-    """Матчинг предсказаний с GT, расчёт метрики."""
-    matched_gt = set()
-    match_scores: list[float] = []
+def _value_present(val: Any) -> bool:
+    s = _to_text(val)
+    return bool(s and s.lower() != "nan" and s != ABSENT_VALUE)
 
-    for _, gt_row in gt_df.iterrows():
-        gt_bc = str(gt_row.get("barcode", "")).strip()
-        gt_qr = str(gt_row.get("qr_code_barcode", "")).strip()
-        gt_bbox = (
-            float(gt_row.get("x_min", 0)),
-            float(gt_row.get("y_min", 0)),
-            float(gt_row.get("x_max", 0)),
-            float(gt_row.get("y_max", 0)),
-        )
-        gt_ts = float(gt_row.get("frame_timestamp", 0)) / 1000.0  # GT в мс
 
-        best_pred = None
-        best_score = -1.0
-
-        for i, pred_row in pred_df.iterrows():
-            if i in matched_gt:
-                continue
-
-            score = 0.0
-
-            # Барcode-матч
-            pred_bc = str(pred_row.get("barcode", "")).strip()
-            pred_qr = str(pred_row.get("qr_code_barcode", "нет")).strip()
-            if gt_bc and pred_bc and gt_bc == pred_bc:
-                score += 2.0
-            if gt_qr and pred_qr != "нет" and gt_qr == pred_qr:
-                score += 2.0
-
-            # IoU-матч (bbox в одних координатах)
-            pred_bbox = (
-                float(pred_row.get("x_min", 0)),
-                float(pred_row.get("y_min", 0)),
-                float(pred_row.get("x_max", 0)),
-                float(pred_row.get("y_max", 0)),
-            )
-            iou = _iou(gt_bbox, pred_bbox)
-            score += iou * 3.0
-
-            # Временная близость
-            pred_ts = float(pred_row.get("frame_timestamp", 0))
-            if abs(pred_ts - gt_ts) < 3.0:
-                score += 0.5
-
-            if score > best_score:
-                best_score = score
-                best_pred = i
-
-        if best_pred is not None and best_score > 0.3:
-            matched_gt.add(best_pred)
-            # Считаем долю верных полей
-            correct = sum(
-                _field_match(pred_df.loc[best_pred, f], gt_row.get(f, ""))
-                for f in EVAL_FIELDS
-                if f in pred_df.columns and f in gt_df.columns
-            )
-            match_scores.append(correct / len(EVAL_FIELDS))
-
-    n_gt = len(gt_df)
-    n_matched = len(match_scores)
-    n_pass = sum(1 for s in match_scores if s >= 0.8)
-    avg_score = sum(match_scores) / max(1, n_matched)
-
+def fill_rates(df: pd.DataFrame) -> dict[str, float]:
+    """Fraction of rows with a recognized value for every output column."""
+    if len(df) == 0:
+        return {c: 0.0 for c in OUTPUT_COLUMNS}
     return {
-        "n_gt": n_gt,
-        "n_matched": n_matched,
-        "recall_match": n_matched / max(1, n_gt),
-        "n_pass_80": n_pass,
-        "metric_80": n_pass / max(1, n_gt),
-        "avg_field_score": avg_score,
+        c: (
+            float(df[c].apply(_value_present).sum()) / len(df)
+            if c in df.columns
+            else 0.0
+        )
+        for c in OUTPUT_COLUMNS
     }
 
 
-def main(videos: list[str] | None = None, interval_ms: int = 500) -> None:
-    results = []
+def match_and_score(
+    pred_df: pd.DataFrame, gt_df: pd.DataFrame, eval_fields: list[str]
+) -> dict[str, Any]:
+    """Match predictions to GT and compute metric@80%, avg field score and recall."""
+    pred_df = prepare_output_dataframe(pred_df)
+    used_pred: set[int] = set()
+    field_hits: dict[str, int] = {f: 0 for f in eval_fields}
+    match_scores: list[float] = []
 
-    for name, video_path, gt_path in LABELED:
-        if videos and name not in videos:
-            continue
-        if not video_path.exists() or not gt_path.exists():
-            logger.warning("Пропускаем %s — файлы не найдены", name)
-            continue
-
-        logger.info("=" * 50)
-        logger.info("Обрабатываем: %s", name)
-
-        # GT
-        gt_df = _normalize_gt(pd.read_csv(gt_path, decimal=","))
-
-        # Прогон пайплайна
-        pred_df = pipeline.run(
-            video_path, interval_ms=interval_ms, adaptive=False, min_hits=2
+    for _, gt_row in gt_df.iterrows():
+        gt_bc = _norm_barcode(gt_row.get("barcode", ""))
+        gt_qr = _norm_barcode(gt_row.get("qr_code_barcode", ""))
+        gt_bbox = (
+            _to_float(gt_row.get("x_min", 0)),
+            _to_float(gt_row.get("y_min", 0)),
+            _to_float(gt_row.get("x_max", 0)),
+            _to_float(gt_row.get("y_max", 0)),
         )
+        gt_ts_ms = _to_float(gt_row.get("frame_timestamp", 0))
 
-        # Оценка
-        scores = match_and_score(pred_df, gt_df)
-        scores["video"] = name
-        results.append(scores)
+        best_pred: int | None = None
+        best_score = -1.0
+        for pred_i, pred_row in pred_df.iterrows():
+            if pred_i in used_pred:
+                continue
+            score = 0.0
+            pred_bc = _norm_barcode(pred_row.get("barcode", ""))
+            pred_qr = _norm_barcode(pred_row.get("qr_code_barcode", ""))
+            if gt_bc and pred_bc and gt_bc == pred_bc:
+                score += 2.0
+            if gt_qr and pred_qr and gt_qr == pred_qr:
+                score += 2.0
+            pred_bbox = (
+                _to_float(pred_row.get("x_min", 0)),
+                _to_float(pred_row.get("y_min", 0)),
+                _to_float(pred_row.get("x_max", 0)),
+                _to_float(pred_row.get("y_max", 0)),
+            )
+            score += _iou(gt_bbox, pred_bbox) * 3.0
+            pred_ts_ms = _to_float(pred_row.get("frame_timestamp", 0))
+            if abs(pred_ts_ms - gt_ts_ms) <= 3000.0:
+                score += 0.5
+            if score > best_score:
+                best_score = score
+                best_pred = int(pred_i)
 
-        logger.info(
-            "%s: GT=%d  matched=%d (%.0f%%)  pass@80%%=%d  metric=%.2f  avg_field=%.2f",
-            name,
-            scores["n_gt"],
-            scores["n_matched"],
-            scores["recall_match"] * 100,
-            scores["n_pass_80"],
-            scores["metric_80"],
-            scores["avg_field_score"],
+        if best_pred is None or best_score <= 0.3:
+            match_scores.append(0.0)
+            continue
+
+        used_pred.add(best_pred)
+        correct = 0
+        for field in eval_fields:
+            if field not in pred_df.columns or field not in gt_df.columns:
+                continue
+            ok = _field_match(
+                pred_df.loc[best_pred, field],
+                gt_row.get(field, ""),
+                field=field,
+            )
+            if ok:
+                correct += 1
+                field_hits[field] += 1
+        match_scores.append(correct / max(1, len(eval_fields)))
+
+    n_gt = len(gt_df)
+    n_matched = len(used_pred)
+    n_pass = sum(1 for s in match_scores if s >= 0.80)
+    return {
+        "n_gt": n_gt,
+        "n_pred": len(pred_df),
+        "n_matched": n_matched,
+        "detection_recall": n_matched / max(1, n_gt),
+        "n_pass_80": n_pass,
+        "metric_80": n_pass / max(1, n_gt),
+        "avg_field": sum(match_scores) / max(1, n_gt),
+        "field_accuracy": {
+            f: field_hits[f] / max(1, n_gt) for f in eval_fields
+        },
+        "barcode_count": (
+            int(pred_df["barcode"].apply(_value_present).sum())
+            if "barcode" in pred_df
+            else 0
+        ),
+        "qr_barcode_count": (
+            int(pred_df["qr_code_barcode"].apply(_value_present).sum())
+            if "qr_code_barcode" in pred_df
+            else 0
+        ),
+        "fill_rates": fill_rates(pred_df),
+    }
+
+
+def evaluate_video(
+    item: LabeledVideo, args: argparse.Namespace, eval_fields: list[str]
+) -> dict[str, Any] | None:
+    """Run pipeline on one video and score it against GT."""
+    if not item.video_path.exists() or not item.csv_path.exists():
+        logger.warning(
+            "skip %s: missing video=%s csv=%s",
+            item.name,
+            item.video_path.exists(),
+            item.csv_path.exists(),
         )
+        return None
 
-    if not results:
-        logger.warning("Нет результатов для записи")
-        return
+    gt_df = normalize_gt(pd.read_csv(item.csv_path, decimal=","))
+    out_csv = (
+        args.output_dir / f"{item.name}.pred.csv" if args.output_dir else None
+    )
+    pred_df = pipeline.run(
+        item.video_path,
+        interval_ms=args.interval_ms,
+        adaptive=args.adaptive,
+        min_hits=args.min_hits,
+        detector_name=args.detector,
+        ocr_top_k=args.ocr_top_k,
+        max_ocr_variants=args.max_ocr_variants,
+        ocr_engine_name=args.ocr_engine,
+        max_duration_sec=args.max_duration_sec,
+        output_csv=out_csv,
+    )
+    scores = match_and_score(pred_df, gt_df, eval_fields=eval_fields)
+    scores["video"] = item.name
+    return scores
 
-    # Сводная таблица
-    print("\n=== Итоговая метрика ===")
-    for r in results:
+
+def summarize(
+    results: list[dict[str, Any]], eval_fields: list[str]
+) -> dict[str, Any]:
+    """Aggregate per-video metrics."""
+    total_gt = sum(int(r["n_gt"]) for r in results)
+    total_pass = sum(int(r["n_pass_80"]) for r in results)
+    total_pred = sum(int(r["n_pred"]) for r in results)
+    total_matched = sum(int(r["n_matched"]) for r in results)
+    avg_field = sum(
+        float(r["avg_field"]) * int(r["n_gt"]) for r in results
+    ) / max(1, total_gt)
+    field_acc = {
+        f: sum(
+            float(r["field_accuracy"].get(f, 0.0)) * int(r["n_gt"])
+            for r in results
+        )
+        / max(1, total_gt)
+        for f in eval_fields
+    }
+    fill = {
+        f: sum(
+            float(r["fill_rates"].get(f, 0.0)) * max(1, int(r["n_pred"]))
+            for r in results
+        )
+        / max(1, total_pred)
+        for f in OUTPUT_COLUMNS
+    }
+    return {
+        "videos": results,
+        "overall": {
+            "n_gt": total_gt,
+            "n_pred": total_pred,
+            "n_matched": total_matched,
+            "detection_recall": total_matched / max(1, total_gt),
+            "n_pass_80": total_pass,
+            "metric_80": total_pass / max(1, total_gt),
+            "avg_field": avg_field,
+            "barcode_count": sum(int(r["barcode_count"]) for r in results),
+            "qr_barcode_count": sum(
+                int(r["qr_barcode_count"]) for r in results
+            ),
+            "field_accuracy": field_acc,
+            "fill_rates": fill,
+        },
+    }
+
+
+def print_summary(summary: dict[str, Any]) -> None:
+    """Print a compact human-readable report."""
+    print("\n=== Per-video metrics ===")
+    for r in summary["videos"]:
         print(
-            f"  {r['video']:15s}: metric@80%={r['metric_80']:.3f}  "
-            f"avg_field={r['avg_field_score']:.3f}  matched={r['n_matched']}/{r['n_gt']}"
+            f"  {r['video']:12s} metric@80={r['metric_80']:.3f} "
+            f"avg_field={r['avg_field']:.3f} recall={r['detection_recall']:.3f} "
+            f"rows={r['n_pred']} gt={r['n_gt']} bc={r['barcode_count']} qr_bc={r['qr_barcode_count']}"
         )
+    o = summary["overall"]
+    print("\n=== Overall ===")
+    print(
+        f"  metric@80={o['metric_80']:.3f} avg_field={o['avg_field']:.3f} "
+        f"recall={o['detection_recall']:.3f} rows={o['n_pred']} gt={o['n_gt']} "
+        f"bc={o['barcode_count']} qr_bc={o['qr_barcode_count']}"
+    )
+    print("\n=== Weakest fields (accuracy) ===")
+    for field, acc in sorted(o["field_accuracy"].items(), key=lambda kv: kv[1])[
+        :12
+    ]:
+        print(f"  {field:<30} {acc:.3f}")
+    print("\n=== Field fill rates over predictions ===")
+    for field, rate in sorted(o["fill_rates"].items(), key=lambda kv: kv[1])[
+        :12
+    ]:
+        print(f"  {field:<30} {rate:.3f}")
 
-    total_gt = sum(r["n_gt"] for r in results)
-    total_pass = sum(r["n_pass_80"] for r in results)
-    overall = total_pass / max(1, total_gt)
-    print(f"\n  OVERALL metric@80%: {overall:.3f}  ({total_pass}/{total_gt})")
 
-    # Запись в METRICS.md
+def append_metrics_md(
+    summary: dict[str, Any], args: argparse.Namespace
+) -> None:
+    """Append a reproducible metrics row to docs/METRICS.md."""
     import subprocess
 
-    commit = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
-    from datetime import date
-
-    today = date.today().isoformat()
-
-    metrics_path = Path("docs/METRICS.md")
-    with metrics_path.open("a") as f:
-        for r in results:
-            f.write(
-                f"| {today} | {commit} | {r['video']} | {r['metric_80']:.3f} | "
-                f"matched={r['n_matched']}/{r['n_gt']} avg_field={r['avg_field_score']:.2f} |\n"
-            )
-    logger.info("Метрика записана в docs/METRICS.md")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Оценка пайплайна на размеченных видео"
+    commit = (
+        subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        or "no-git"
     )
+    today = date.today().isoformat()
+    o = summary["overall"]
+    command = (
+        f"PYTHONPATH=src python scripts/eval_on_labeled.py --data-root {args.data_root} "
+        f"--interval-ms {args.interval_ms} --detector {args.detector} --ocr-engine {args.ocr_engine} --ocr-top-k {args.ocr_top_k}"
+    )
+    per_video = "; ".join(
+        f"{r['video']} avg={r['avg_field']:.3f} m80={r['metric_80']:.3f}"
+        for r in summary["videos"]
+    )
+    with Path("docs/METRICS.md").open("a", encoding="utf-8") as f:
+        f.write(
+            f"| {today} | {commit} | labeled-5 full pipeline | {o['metric_80']:.3f} | "
+            f"avg_field={o['avg_field']:.3f}; recall={o['detection_recall']:.3f}; "
+            f"rows={o['n_pred']}; gt={o['n_gt']}; bc={o['barcode_count']}; qr_bc={o['qr_barcode_count']}; "
+            f"cmd=`{command}`; {per_video} |\n"
+        )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Evaluate ShelfWatch on locally available labeled videos"
+    )
+    parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument(
         "--videos",
         nargs="*",
         default=None,
-        help="Список видео (25_12-20 26_12-20 43_15)",
+        help="Subset of video names, e.g. 25_2-10 26_12-20",
     )
+    parser.add_argument("--interval-ms", type=int, default=250)
+    parser.add_argument("--detector", default="hybrid")
     parser.add_argument(
-        "--interval", type=int, default=500, help="Интервал семплирования (мс)"
+        "--ocr-engine",
+        default="auto",
+        choices=["auto", "paddle_v4", "paddle_v5", "easyocr", "none"],
     )
+    parser.add_argument("--min-hits", type=int, default=2)
+    parser.add_argument("--ocr-top-k", type=int, default=3)
+    parser.add_argument("--max-ocr-variants", type=int, default=2)
+    parser.add_argument("--max-duration-sec", type=float, default=None)
+    parser.add_argument("--adaptive", action="store_true", default=False)
+    parser.add_argument(
+        "--eval-fields", choices=["compact", "all"], default="compact"
+    )
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--json-out", type=Path, default=None)
+    parser.add_argument("--append-metrics", action="store_true")
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args = parser.parse_args()
-    main(videos=args.videos, interval_ms=args.interval)
+    if args.output_dir:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    eval_fields = (
+        COMPACT_EVAL_FIELDS
+        if args.eval_fields == "compact"
+        else ALL_VALUE_FIELDS
+    )
+    items = find_labeled_videos(args.data_root, args.videos)
+    results: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for item in items:
+        if not item.video_path.exists() or not item.csv_path.exists():
+            missing.append(
+                f"{item.name}: video={item.video_path} csv={item.csv_path}"
+            )
+            logger.warning("missing %s", missing[-1])
+            continue
+        logger.info("Processing %s", item.name)
+        result = evaluate_video(item, args, eval_fields)
+        if result:
+            results.append(result)
+
+    if not results:
+        print("No labeled videos were evaluated. Missing expected files:")
+        for line in missing:
+            print(f"  - {line}")
+        return
+
+    summary = summarize(results, eval_fields)
+    print_summary(summary)
+    if args.json_out:
+        args.json_out.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    if args.append_metrics:
+        append_metrics_md(summary, args)
+
+
+if __name__ == "__main__":
+    main()

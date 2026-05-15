@@ -49,6 +49,7 @@ def process_video(
     min_hits: int,
     adaptive: bool,
     detector_name: str,
+    ocr_engine_name: str,
     ocr_top_k: int,
     max_duration_sec: int,
     progress: gr.Progress = gr.Progress(track_tqdm=True),
@@ -87,6 +88,7 @@ def process_video(
             detector_name=detector_name,
             max_duration_sec=limit,
             ocr_top_k=int(ocr_top_k),
+            ocr_engine_name=ocr_engine_name,
             progress_callback=_progress,
         )
 
@@ -161,6 +163,18 @@ def build_app() -> gr.Blocks:
                         label="Детектор",
                         info="hybrid = trained tiled YOLO если есть веса + MSER fallback",
                     )
+                    ocr_engine_radio = gr.Radio(
+                        choices=[
+                            "auto",
+                            "paddle_v4",
+                            "paddle_v5",
+                            "easyocr",
+                            "none",
+                        ],
+                        value="auto",
+                        label="OCR backend",
+                        info="PP-OCRv5 mobile опционален; auto держит стабильный локальный fallback.",
+                    )
                     interval_slider = gr.Slider(
                         minimum=100,
                         maximum=2000,
@@ -218,6 +232,7 @@ def build_app() -> gr.Blocks:
                 min_hits_slider,
                 adaptive_check,
                 detector_radio,
+                ocr_engine_radio,
                 ocr_top_k_slider,
                 duration_slider,
             ],

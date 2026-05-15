@@ -23,7 +23,7 @@ qreader = ">=3.8,<4"
 huggingface-hub = ">=0.24,<2"
 
 [tool.poetry.group.ocr.dependencies]
-paddleocr = {version = ">=2.7,<3", python = "<3.13"}
+paddleocr = {version = ">=2.7,<4", python = "<3.13"}
 paddlepaddle = {version = ">=2.6,<4", python = "<3.13"}
 
 [tool.poetry.group.dev.dependencies]

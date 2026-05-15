@@ -6,6 +6,7 @@ import re
 from difflib import SequenceMatcher
 
 from shelf.schema import ABSENT_VALUE, PriceTag
+from shelf.validation import normalize_ean13
 
 _EMPTY = ("", ABSENT_VALUE, None)
 
@@ -125,8 +126,8 @@ def _same_physical_tag(
 
 def _barcode_key(tag: PriceTag) -> str:
     for raw in (tag.qr_code_barcode, tag.barcode):
-        digits = re.sub(r"\D", "", str(raw or ""))
-        if len(digits) >= 8:
+        digits = normalize_ean13(raw, allow_repair=False)
+        if digits:
             return digits
     return ""
 

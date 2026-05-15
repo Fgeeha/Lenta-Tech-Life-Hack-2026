@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import re
-
-from shelf.qr.barcode_roi import ean13_repair
 from shelf.schema import ABSENT_VALUE, PriceTag
+from shelf.validation import normalize_ean13
 
 _QR_PRIORITY_FIELDS = {
     "qr_code_barcode",
@@ -111,12 +109,16 @@ def _fmt_price_for_qr(val: str) -> str:
 
 
 def _normalize_barcode(raw: str) -> str:
+    """Normalize barcode strictly for production rows.
+
+    Only valid EAN-13 values are kept.  Conservative 14→13 repair is allowed to
+    undo pandas/decoder artifacts such as a trailing ``.0`` digit, but 12-digit
+    values are not appended because they can be SKU IDs.
+    """
     try:
-        text = str(raw).strip()
-        if text.lower().endswith(".0"):
-            text = text[:-2]
-        digits = re.sub(r"\D", "", text)
-        repaired = ean13_repair(digits) if 12 <= len(digits) <= 14 else None
-        return repaired or digits or text
+        normalized = normalize_ean13(
+            raw, allow_repair=True, allow_append_12=False, allow_drop_14=True
+        )
+        return normalized
     except (ValueError, OverflowError):
-        return str(raw)
+        return ""

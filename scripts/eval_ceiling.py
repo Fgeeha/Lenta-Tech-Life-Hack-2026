@@ -17,10 +17,11 @@ import pandas as pd
 
 from shelf.ocr.engine import OCREngine
 from shelf.ocr.parser import parse_ocr_result
-from shelf.ocr.preprocess import preprocess_crop
+from shelf.ocr.preprocess import ocr_variants
 from shelf.ocr.template import classify_color
 from shelf.postproc.merge import merge
-from shelf.qr.decoder import decode_qr
+from shelf.postproc.voting import merge_candidate_tags
+from shelf.qr.decoder import decode_barcode, decode_qr
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -151,41 +152,40 @@ def _extract_one(
     if crop_raw.size == 0:
         return {}
 
-    # QR (все ориентации)
-    qr_fields: dict[str, str] = {}
-    for rot in [
-        cv2.ROTATE_90_COUNTERCLOCKWISE,
-        None,
-        cv2.ROTATE_180,
-        cv2.ROTATE_90_CLOCKWISE,
-    ]:
-        img = cv2.rotate(crop_raw, rot) if rot is not None else crop_raw
-        qr_fields = decode_qr(img)
-        if qr_fields:
-            break
+    qr_fields = decode_qr(crop_raw)
+    linear_barcode = decode_barcode(crop_raw)
+    if linear_barcode and not qr_fields.get("barcode"):
+        qr_fields["barcode"] = linear_barcode
 
     color = classify_color(crop_raw)
-    proc = preprocess_crop(
-        crop_raw,
-        rotate_180=True,
-        deskew=True,
-        upscale=2,
-        sharpen=False,
-        clahe=False,
+    candidate_tags = []
+    for proc in (ocr_variants(crop_raw) or [crop_raw])[:3]:
+        ocr_lines = ocr.run(proc)
+        ocr_tag = parse_ocr_result(
+            ocr_lines,
+            crop=proc,
+            crop_raw=crop_raw,
+            filename=str(row.get("filename", "")),
+            frame_timestamp=float(row.get("frame_timestamp", 0)),
+            bbox=(x1, y1, x2, y2),
+            color=color,
+            ocr_ru=ocr_ru,
+        )
+        candidate_tags.append(merge(ocr_tag, qr_fields))
+    merged = (
+        merge_candidate_tags(candidate_tags)
+        if candidate_tags
+        else merge(
+            parse_ocr_result(
+                [],
+                filename=str(row.get("filename", "")),
+                frame_timestamp=float(row.get("frame_timestamp", 0)),
+                bbox=(x1, y1, x2, y2),
+                color=color,
+            ),
+            qr_fields,
+        )
     )
-    ocr_lines = ocr.run(proc)
-
-    ocr_tag = parse_ocr_result(
-        ocr_lines,
-        crop=proc,
-        crop_raw=crop_raw,
-        filename=str(row.get("filename", "")),
-        frame_timestamp=float(row.get("frame_timestamp", 0)) / 1000.0,
-        bbox=(x1, y1, x2, y2),
-        color=color,
-        ocr_ru=ocr_ru,
-    )
-    merged = merge(ocr_tag, qr_fields)
     return merged.__dict__
 
 
