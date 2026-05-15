@@ -41,6 +41,14 @@ _NAME_BAD_RE = re.compile(
 _PRICE_RE = re.compile(
     r"(?<!\d)(\d{1,3}(?:[\s\u00a0]?\d{3})+|\d{1,6})(?:[,.\-](\d{1,2}))?(?!\d)"
 )
+_NAME_DATE_RE = re.compile(
+    r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}(?:\s+\d{1,2}[:.]\d{2})?"
+)
+_NAME_LONG_DIGITS_RE = re.compile(r"\d{8,}")
+_NAME_PRICE_RE = re.compile(
+    r"(?<!\w)\d{1,5}(?:[,.\-]\d{1,2})?\s*(?:руб\.?|₽)(?!\w)", re.IGNORECASE
+)
+_NAME_CODE_RE = re.compile(r"\b\d{2}\s*_\s*\d{3,6}(?:\s*[-–]\s*\d{3,6})?\b")
 
 
 @dataclass(frozen=True)
@@ -441,16 +449,32 @@ def _choose_price(
 
 
 def _clean_name(text: str) -> str:
-    text = re.sub(r"\s+", " ", str(text)).strip(" -|•\t\n")
+    """Clean a product-name candidate without destroying useful percents."""
+    text = str(text or "").replace("\u00a0", " ")
+    text = _NAME_DATE_RE.sub(" ", text)
+    text = _NAME_CODE_RE.sub(" ", text)
+    text = _NAME_LONG_DIGITS_RE.sub(" ", text)
+    text = _NAME_PRICE_RE.sub(" ", text)
+    text = re.sub(
+        r"\b(?:qr|ean|barcode|штрих\s*код|артикул|id[_\s-]*sku|цена|карта|без\s+карты|по\s+карте)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s+", " ", text).strip(" -|•\t\n")
     if len(text) < 3 or _NAME_BAD_RE.fullmatch(text):
         return ""
-    parts = []
-    seen = set()
+    parts: list[str] = []
+    seen: set[str] = set()
     for part in re.split(r"\s{2,}|\|", text):
         part = part.strip(" -|•\t\n")
         if len(part) < 3 or _NAME_BAD_RE.fullmatch(part):
             continue
-        key = part.lower()
+        letters = len(re.findall(r"[a-zа-яё]", part.lower()))
+        digits = len(re.findall(r"\d", part))
+        if letters < 2 or digits > max(8, letters * 2):
+            continue
+        key = re.sub(r"\s+", " ", part.lower())
         if key not in seen:
             seen.add(key)
             parts.append(part)
@@ -458,38 +482,62 @@ def _clean_name(text: str) -> str:
 
 
 def _name_score(name: str, weight: float) -> float:
-    letters = len(re.findall(r"[a-zа-яё]", name.lower()))
-    digits = len(re.findall(r"\d", name))
-    tokens = len(re.findall(r"[a-zа-яё0-9]+", name.lower()))
-    penalty = 0.45 if digits > letters else 1.0
-    return (letters + 3 * tokens) * weight * penalty
+    text = _clean_name(name)
+    if not text:
+        return 0.0
+    lower = text.lower()
+    letters = len(re.findall(r"[a-zа-яё]", lower))
+    cyr = len(re.findall(r"[а-яё]", lower))
+    digits = len(re.findall(r"\d", text))
+    tokens = len(re.findall(r"[a-zа-яё0-9]+", lower))
+    numeric_noise = digits / max(1, letters + digits)
+    cyr_ratio = cyr / max(1, letters)
+    penalty = max(0.25, 1.0 - numeric_noise)
+    return (letters + cyr_ratio * 8.0 + 3.0 * tokens) * weight * penalty
 
 
-def _choose_product_name(
-    tags: Sequence[PriceTag], weights: Sequence[float], field: str
-) -> FieldDecision | None:
+def select_product_name_candidate(
+    candidates: Sequence[str], weights: Sequence[float] | None = None
+) -> str:
+    """Select the cleanest product-name candidate from OCR/catalog sources."""
+    if not candidates:
+        return ""
+    w = list(weights or [1.0] * len(candidates))
+    if len(w) < len(candidates):
+        w.extend([1.0] * (len(candidates) - len(w)))
     best: tuple[float, str] | None = None
-    for tag, weight in zip(tags, weights):
-        name = _clean_name(tag.product_name)
+    for candidate, weight in zip(candidates, w):
+        name = _clean_name(candidate)
         if not name:
             continue
-        score = _name_score(name, weight)
+        score = _name_score(name, float(weight))
         if (
             best is None
             or score > best[0]
             or (abs(score - best[0]) < 1e-6 and len(name) > len(best[1]))
         ):
             best = (score, name)
-    if best is None:
+    return best[1] if best else ""
+
+
+def _choose_product_name(
+    tags: Sequence[PriceTag], weights: Sequence[float], field: str
+) -> FieldDecision | None:
+    candidates = [str(t.product_name or "") for t in tags]
+    selected = select_product_name_candidate(candidates, weights)
+    if not selected:
         return None
-    max_score = max(
+    best_score = _name_score(selected, 1.0)
+    total_score = max(
         1.0,
         sum(
-            _name_score(_clean_name(t.product_name), w)
-            for t, w in zip(tags, weights)
+            _name_score(name, weight)
+            for name, weight in zip(candidates, weights)
         ),
     )
-    return FieldDecision(best[1], "ocr_vote", min(1.0, best[0] / max_score))
+    return FieldDecision(
+        selected, "ocr_vote", min(1.0, best_score / total_score)
+    )
 
 
 def _choose_datetime(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from shelf.ocr.template import classify_color
 from shelf.postproc.catalog import apply_catalog, load_catalog_from_env
 from shelf.postproc.dedup import deduplicate_tags, tag_completeness
 from shelf.postproc.merge import merge
+from shelf.postproc.pass80 import optimize_tags
 from shelf.postproc.voting import merge_candidate_tags
 from shelf.qr.decoder import decode_barcode, decode_qr
 from shelf.schema import OUTPUT_COLUMNS, PriceTag
@@ -28,6 +30,19 @@ from shelf.schema import OUTPUT_COLUMNS, PriceTag
 logger = logging.getLogger(__name__)
 
 _CROP_MARGIN = 24
+
+
+def _append_debug_row(
+    path: Path, fieldnames: list[str], row: dict[str, object]
+) -> None:
+    """Append a structured debug row without polluting normal runs."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in fieldnames})
 
 
 def _limit_tracks_for_ocr(best_tracks: dict[int, object]) -> dict[int, object]:
@@ -66,6 +81,8 @@ def _extract_tag(
     ocr_engine: OCREngine,
     ocr_engine_ru: OCREngine | None = None,
     max_ocr_variants: int = 2,
+    debug_dir: str | Path | None = None,
+    track_id: int | None = None,
 ) -> PriceTag:
     """Process one crop: QR + color + OCR + parser + merge."""
     base = PriceTag(
@@ -79,8 +96,18 @@ def _extract_tag(
     if crop_raw is None or crop_raw.size == 0:
         return base
 
-    qr_fields = decode_qr(crop_raw)
-    linear_barcode = decode_barcode(crop_raw)
+    qr_fields = decode_qr(
+        crop_raw,
+        debug_dir=debug_dir,
+        track_id=track_id,
+        timestamp_ms=timestamp_ms,
+    )
+    linear_barcode = decode_barcode(
+        crop_raw,
+        debug_dir=debug_dir,
+        track_id=track_id,
+        timestamp_ms=timestamp_ms,
+    )
     if linear_barcode and not qr_fields.get("barcode"):
         qr_fields["barcode"] = linear_barcode
     color = classify_color(crop_raw)
@@ -122,6 +149,8 @@ def _candidate_to_tag(
     ocr_engine: OCREngine,
     ocr_engine_ru: OCREngine | None,
     max_ocr_variants: int,
+    debug_dir: str | Path | None = None,
+    track_id: int | None = None,
 ) -> PriceTag:
     d = candidate.det
     return _extract_tag(
@@ -135,6 +164,8 @@ def _candidate_to_tag(
         ocr_engine=ocr_engine,
         ocr_engine_ru=ocr_engine_ru,
         max_ocr_variants=max_ocr_variants,
+        debug_dir=debug_dir,
+        track_id=track_id,
     )
 
 
@@ -249,7 +280,54 @@ def run(
                 ocr_engine,
                 ocr_engine_ru,
                 max_ocr_variants=max_ocr_variants,
+                debug_dir=debug_path,
+                track_id=int(tid),
             )
+            if debug_path is not None:
+                _append_debug_row(
+                    debug_path / "product_name_candidates.csv",
+                    [
+                        "track_id",
+                        "candidate_idx",
+                        "timestamp",
+                        "score",
+                        "product_name",
+                    ],
+                    {
+                        "track_id": tid,
+                        "candidate_idx": ci,
+                        "timestamp": int(cand.timestamp_ms),
+                        "score": f"{cand.score:.4f}",
+                        "product_name": tag.product_name,
+                    },
+                )
+                _append_debug_row(
+                    debug_path / "price_candidates.csv",
+                    [
+                        "track_id",
+                        "candidate_idx",
+                        "timestamp",
+                        "score",
+                        "price_default",
+                        "price_card",
+                        "price_discount",
+                        "discount_amount",
+                        "price1_qr",
+                        "price4_qr",
+                    ],
+                    {
+                        "track_id": tid,
+                        "candidate_idx": ci,
+                        "timestamp": int(cand.timestamp_ms),
+                        "score": f"{cand.score:.4f}",
+                        "price_default": tag.price_default,
+                        "price_card": tag.price_card,
+                        "price_discount": tag.price_discount,
+                        "discount_amount": tag.discount_amount,
+                        "price1_qr": tag.price1_qr,
+                        "price4_qr": tag.price4_qr,
+                    },
+                )
             candidate_tags.append(tag)
         best = merge_candidate_tags(
             candidate_tags, candidate_scores=[c.score for c in candidates]
@@ -264,7 +342,17 @@ def run(
     # Trackers can split one physical tag; merge duplicate rows conservatively.
     tags = deduplicate_tags(tags)
     # Optional local catalog lookup from data/catalog.csv or SHELF_CATALOG_PATH.
-    tags = apply_catalog(tags, load_catalog_from_env())
+    catalog = load_catalog_from_env()
+    tags = apply_catalog(tags, catalog)
+    tags, pass80_report = optimize_tags(
+        tags, catalog=catalog, debug_dir=debug_path
+    )
+    if pass80_report.changes:
+        logger.info(
+            "Pass80 optimizer: %d field updates, proxy_crossed=%d",
+            len(pass80_report.changes),
+            pass80_report.proxy_crossed_80,
+        )
     df = prepare_output_dataframe(
         pd.DataFrame([t.to_dict() for t in tags], columns=OUTPUT_COLUMNS)
     )

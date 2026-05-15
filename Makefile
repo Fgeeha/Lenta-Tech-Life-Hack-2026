@@ -1,4 +1,4 @@
-.PHONY: install run eval test format poetry-install poetry-run poetry-eval poetry-test poetry-format docker-build docker-run
+.PHONY: install run eval test format poetry-install poetry-run poetry-eval poetry-test poetry-format docker-build docker-run poetry-run-eval-on-labeled
 
 install:  ## install runtime/dev dependencies with pip
 	pip install -r requirements.txt
@@ -37,3 +37,14 @@ poetry-test:  ## запустить тесты
 poetry-format:  ## ruff fix + black
 	poetry run ruff check --fix .
 	poetry run black .
+
+poetry-run-eval-on-labeled: ## poetry run python scripts/eval_on_labeled.py
+	 PYTHONPATH=src poetry run python scripts/eval_on_labeled.py \
+	  --data-root Данные \
+	  --interval-ms 250 \
+	  --detector hybrid \
+	  --ocr-engine auto \
+	  --ocr-top-k 3 \
+	  --reports-dir reports/eval_stage4 \
+	  --json-out reports/eval_stage4.json \
+	  --append-metrics

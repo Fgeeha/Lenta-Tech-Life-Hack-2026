@@ -684,3 +684,77 @@ video → hybrid detection → tracking → top-K crops → preprocessing → OC
 ```
 
 Текущая версия делает упор на воспроизводимость, conservative parsing и корректный CSV-вывод без агрессивного угадывания полей.
+---
+
+## Stage 3: что добавлено в текущем архиве
+
+- `sample_frames(..., max_timestamp_ms=...)`: duration-limit теперь останавливает декодирование видео, что важно для UI/smoke на длинных 4K роликах.
+- Local-only YOLO discovery: сначала `SHELF_YOLO_WEIGHTS`, затем `models/`, затем bundled `runs/detect/...`; network download только через `SHELF_ALLOW_MODEL_DOWNLOAD=true`.
+- Price parser: восстановление цен, разбитых OCR на рубли/копейки (`129` + `99`), и защита от ложной цены из слова `без`.
+- Field voting/merge: QR `price1/price4` заполняет пустые `price_default/price_card`; явно инвертированные card/default цены меняются местами; discount деривируется из двух цен.
+- Product name cleanup: удаляются даты, barcode/SKU и явные price-токены, но сохраняются полезные проценты в названии (`3.2%`).
+- QR/barcode feature flags: `full` остаётся default; `fast/off` нужны только для smoke/HF runs.
+- Eval scripts: при отсутствии приватных 5 видео создают понятный JSON со списком missing paths и не записывают фальшивые нулевые метрики.
+- Тесты: после изменений `99 passed`.
+
+---
+
+## Stage 4: metric@80-oriented postprocessing
+
+This pass keeps the existing architecture and focuses on the fields that drive the organizer metric: barcode/QR barcode, QR price fields, card/default prices, SKU and product name.  It does **not** change `OUTPUT_COLUMNS` and does not use cloud APIs.
+
+### New default-safe improvements
+
+- `src/shelf/ocr/layout.py` adds rule-based Lenta template priors.  It classifies a crop as `regular`, `promo`, `discount`, `wholesale`, `bogof` or `unknown`, detects horizontal/vertical/rotated orientation, and returns broad ROIs for product name, QR, barcode, prices, SKU, datetime, code and special symbols.
+- `src/shelf/qr/decoder.py` now tries template-derived QR/barcode ROIs before generic geometric ROIs and full-crop variants.  Debug mode can write `successful_code_reads.csv` and failed ROI crops.
+- `src/shelf/postproc/pass80.py` adds a conservative pass80 optimizer.  It synchronizes a valid QR barcode into `barcode`, derives empty OCR price fields from QR prices, fixes clearly inverted `price_card`/`price_default`, derives `discount_amount`, and can use the local catalog for missing names/prices.
+- `scripts/eval_on_labeled.py` now supports per-tag diagnostics via `--reports-dir`, writing `matched_tags_debug.csv`, `field_accuracy.csv`, `pass80_candidates.csv` and `failed_near_threshold.csv`.
+- Product name voting is stricter: dates, long numeric IDs, service codes and price tokens are removed, but useful product percents such as `3.2%` are preserved.
+- Debug-only `product_name_candidates.csv`, `price_candidates.csv` and `pass80_optimizer_report.csv` are written when `debug_dir` is passed to the pipeline.
+
+### Additional feature flags
+
+```bash
+# Off by default: use only after validation that all evaluated tags have QR.
+export SHELF_PASS80_SYNC_BARCODE_TO_QR=true
+
+# Off by default because historical GT often has price_discount="нет".
+export SHELF_PASS80_FILL_PRICE_DISCOUNT=true
+```
+
+Existing flags remain supported:
+
+```bash
+export SHELF_YOLO_WEIGHTS=/path/to/best.pt
+export SHELF_OCR_ENGINE=auto          # auto|paddle_v4|paddle_v5|easyocr|none
+export SHELF_CODE_DECODE_MODE=full    # full|fast|off
+export SHELF_CODE_MAX_VARIANTS=24
+export SHELF_ENABLE_BARCODE_REPAIR=false
+export SHELF_CATALOG_PATH=data/catalog.csv
+export SHELF_USE_SR=false
+export SHELF_MAX_TRACKS=2
+export SHELF_MSER_PROCESS_WIDTH=480
+```
+
+### Evaluation with diagnostics
+
+```bash
+PYTHONPATH=src python scripts/eval_on_labeled.py \
+  --data-root Данные \
+  --interval-ms 250 \
+  --detector hybrid \
+  --ocr-engine auto \
+  --ocr-top-k 3 \
+  --reports-dir reports/full_eval \
+  --json-out reports/full_eval.json
+```
+
+When the private five-video data root is not available, the script exits cleanly and lists missing paths instead of appending fake zero metrics.
+
+### Build the local catalog
+
+```bash
+PYTHONPATH=src python scripts/build_catalog.py Данные --out data/catalog.csv
+```
+
+In the supplied archive of this pass, `data/catalog.csv` was rebuilt from all available local CSV files and contains 266 local barcode/SKU keys.  No external product API is used.

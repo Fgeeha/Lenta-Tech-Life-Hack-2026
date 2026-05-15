@@ -40,3 +40,12 @@ def test_code_decode_off_mode(monkeypatch):
     crop = np.zeros((32, 64, 3), dtype=np.uint8)
     assert decode_qr(crop) == {}
     assert decode_barcode(crop) == ""
+
+
+def test_template_roi_variants_precede_geometric_fallbacks():
+    from shelf.qr.decoder import _template_roi_variants
+
+    crop = np.ones((120, 240, 3), dtype=np.uint8) * 255
+    variants = _template_roi_variants(crop, kind="qr")
+    assert variants
+    assert all(v.size > 0 for v in variants)

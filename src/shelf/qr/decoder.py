@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import re
+from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlparse
 
 import cv2
 import numpy as np
 
+from shelf.ocr.layout import roi_crops
 from shelf.qr.barcode_roi import ean13_repair
 from shelf.validation import normalize_ean13
 
@@ -74,6 +77,98 @@ def _variant_limit(default_full: int, default_fast: int) -> int:
         except ValueError:
             logger.warning("Invalid SHELF_CODE_MAX_VARIANTS=%r; ignoring", raw)
     return default_fast if _decode_mode() == "fast" else default_full
+
+
+def _debug_path(debug_dir: str | Path | None) -> Path | None:
+    """Create and return an optional code-decoding debug directory."""
+    if not debug_dir:
+        return None
+    path = Path(debug_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _context_suffix(track_id: int | None, timestamp_ms: float | None) -> str:
+    tid = "na" if track_id is None else str(track_id)
+    ts = "na" if timestamp_ms is None else str(int(timestamp_ms))
+    return f"track_{tid}_{ts}ms"
+
+
+def _success_value(fields: dict[str, str]) -> str:
+    for key in ("qr_code_barcode", "price1_qr", "price4_qr", "action_code_qr"):
+        value = fields.get(key, "")
+        if value:
+            return value
+    return "|".join(f"{k}={v}" for k, v in sorted(fields.items()))
+
+
+def _log_success(
+    debug_dir: str | Path | None,
+    *,
+    track_id: int | None,
+    timestamp_ms: float | None,
+    source: str,
+    raw: str,
+    normalized: str,
+    roi_type: str,
+) -> None:
+    """Append one successful QR/barcode read to debug CSV when requested."""
+    path = _debug_path(debug_dir)
+    if path is None:
+        return
+    csv_path = path / "successful_code_reads.csv"
+    write_header = not csv_path.exists()
+    with csv_path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "track_id",
+                "timestamp",
+                "source",
+                "raw",
+                "normalized",
+                "roi_type",
+            ],
+        )
+        if write_header:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "track_id": "" if track_id is None else track_id,
+                "timestamp": "" if timestamp_ms is None else int(timestamp_ms),
+                "source": source,
+                "raw": raw,
+                "normalized": normalized,
+                "roi_type": roi_type,
+            }
+        )
+
+
+def _save_failed_roi_examples(
+    debug_dir: str | Path | None,
+    crop: np.ndarray,
+    *,
+    kind: str,
+    track_id: int | None,
+    timestamp_ms: float | None,
+) -> None:
+    """Save a small bounded set of failed template/geometric ROIs for inspection."""
+    path = _debug_path(debug_dir)
+    if path is None or crop is None or crop.size == 0:
+        return
+    out_dir = path / "failed_code_rois"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = _context_suffix(track_id, timestamp_ms)
+    samples = _named_template_rois(
+        crop, {"qr", "barcode"}
+    ) + _named_geometric_rois(crop, kind)
+    for idx, (name, roi) in enumerate(samples[:12]):
+        if roi is None or roi.size == 0:
+            continue
+        safe_name = re.sub(r"[^0-9A-Za-z_:-]+", "_", name)
+        cv2.imwrite(
+            str(out_dir / f"{kind}_{suffix}_{idx:02d}_{safe_name}.jpg"), roi
+        )
 
 
 def _barcode_repair_enabled() -> bool:
@@ -263,6 +358,40 @@ def _roi_boxes(width: int, height: int) -> list[tuple[str, int, int, int, int]]:
     ]
 
 
+def _named_template_rois(
+    crop: np.ndarray, purposes: set[str] | None = None
+) -> list[tuple[str, np.ndarray]]:
+    """Return template-derived semantic ROIs before generic geometric fallbacks."""
+    if crop is None or crop.size == 0:
+        return []
+    return [
+        (f"template:{name}", roi) for name, roi in roi_crops(crop, purposes)
+    ]
+
+
+def _named_geometric_rois(
+    crop: np.ndarray, kind: str = "qr"
+) -> list[tuple[str, np.ndarray]]:
+    """Return named geometric ROIs used as a safe fallback."""
+    if crop is None or crop.size == 0:
+        return []
+    h, w = crop.shape[:2]
+    min_w = max(12, int(w * 0.08))
+    min_h = max(12, int(h * 0.08))
+    out: list[tuple[str, np.ndarray]] = []
+    for name, x1, y1, x2, y2 in _roi_boxes(w, h):
+        if kind == "barcode" and not name.startswith("barcode"):
+            continue
+        if kind == "qr" and name.startswith("barcode"):
+            continue
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 - x1 < min_w or y2 - y1 < min_h:
+            continue
+        out.append((f"geom:{name}", crop[y1:y2, x1:x2]))
+    return out
+
+
 def _enhance_code_roi(roi: np.ndarray) -> list[np.ndarray]:
     """Return lightweight ROI variants for QR/linear barcode decoding."""
     if roi is None or roi.size == 0:
@@ -292,52 +421,52 @@ def _enhance_code_roi(roi: np.ndarray) -> list[np.ndarray]:
     return variants
 
 
-def _roi_variants(crop: np.ndarray) -> list[np.ndarray]:
-    """Generate targeted code ROIs before expensive full-crop decoding."""
+def _named_roi_variants(
+    crop: np.ndarray, kind: str = "qr"
+) -> list[tuple[str, np.ndarray]]:
+    """Generate template ROI variants first, then geometric ROI variants."""
     if crop is None or crop.size == 0:
         return []
-    out: list[np.ndarray] = []
+    out: list[tuple[str, np.ndarray]] = []
     rotations = (
-        None,
-        cv2.ROTATE_90_COUNTERCLOCKWISE,
-        cv2.ROTATE_180,
-        cv2.ROTATE_90_CLOCKWISE,
+        ("upright", None),
+        ("rot90ccw", cv2.ROTATE_90_COUNTERCLOCKWISE),
+        ("rot180", cv2.ROTATE_180),
+        ("rot90cw", cv2.ROTATE_90_CLOCKWISE),
     )
-    for rot in rotations:
+    purposes = {"barcode"} if kind == "barcode" else {"qr"}
+    for rot_name, rot in rotations:
         base = cv2.rotate(crop, rot) if rot is not None else crop
-        h, w = base.shape[:2]
-        min_w = max(12, int(w * 0.08))
-        min_h = max(12, int(h * 0.08))
-        for _, x1, y1, x2, y2 in _roi_boxes(w, h):
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
-            if x2 - x1 < min_w or y2 - y1 < min_h:
-                continue
-            roi = base[y1:y2, x1:x2]
-            out.extend(_enhance_code_roi(roi))
+        named_rois = _named_template_rois(
+            base, purposes
+        ) + _named_geometric_rois(base, kind)
+        for roi_name, roi in named_rois:
+            for variant_idx, variant in enumerate(_enhance_code_roi(roi)):
+                out.append((f"{rot_name}:{roi_name}:v{variant_idx}", variant))
     return out
+
+
+def _template_roi_variants(
+    crop: np.ndarray, kind: str = "qr"
+) -> list[np.ndarray]:
+    """Expose template-derived code ROI variants for tests/debugging."""
+    if crop is None or crop.size == 0:
+        return []
+    purposes = {"barcode"} if kind == "barcode" else {"qr"}
+    out: list[np.ndarray] = []
+    for _, roi in _named_template_rois(crop, purposes):
+        out.extend(_enhance_code_roi(roi))
+    return out
+
+
+def _roi_variants(crop: np.ndarray) -> list[np.ndarray]:
+    """Generate targeted code ROIs before expensive full-crop decoding."""
+    return [img for _, img in _named_roi_variants(crop, "qr")]
 
 
 def _barcode_roi_variants(crop: np.ndarray) -> list[np.ndarray]:
     """Return bottom/right barcode-oriented ROIs for pyzbar."""
-    if crop is None or crop.size == 0:
-        return []
-    out: list[np.ndarray] = []
-    rotations = (
-        None,
-        cv2.ROTATE_90_COUNTERCLOCKWISE,
-        cv2.ROTATE_180,
-        cv2.ROTATE_90_CLOCKWISE,
-    )
-    for rot in rotations:
-        base = cv2.rotate(crop, rot) if rot is not None else crop
-        h, w = base.shape[:2]
-        for name, x1, y1, x2, y2 in _roi_boxes(w, h):
-            if not name.startswith("barcode"):
-                continue
-            roi = base[max(0, y1) : min(h, y2), max(0, x1) : min(w, x2)]
-            out.extend(_enhance_code_roi(roi))
-    return out
+    return [img for _, img in _named_roi_variants(crop, "barcode")]
 
 
 def _raw_to_fields(raw: str) -> dict[str, str]:
@@ -360,8 +489,19 @@ def _raw_to_fields(raw: str) -> dict[str, str]:
     return {}
 
 
-def decode_qr(crop: np.ndarray) -> dict[str, str]:
-    """Read QR/barcode from a price-tag crop."""
+def decode_qr(
+    crop: np.ndarray,
+    *,
+    debug_dir: str | Path | None = None,
+    track_id: int | None = None,
+    timestamp_ms: float | None = None,
+) -> dict[str, str]:
+    """Read QR/barcode payload from a price-tag crop.
+
+    Template-derived ROIs are tried before generic right/bottom heuristics and
+    full-crop variants.  Debug artifacts are written only when ``debug_dir`` is
+    provided.
+    """
     if crop is None or crop.size == 0 or _decode_mode() == "off":
         return {}
 
@@ -369,57 +509,139 @@ def decode_qr(crop: np.ndarray) -> dict[str, str]:
     for raw in _try_pyzbar(crop) + _try_opencv(crop):
         parsed = _raw_to_fields(raw)
         if parsed:
+            _log_success(
+                debug_dir,
+                track_id=track_id,
+                timestamp_ms=timestamp_ms,
+                source="qr_full_original",
+                raw=raw,
+                normalized=_success_value(parsed),
+                roi_type="full",
+            )
             return parsed
 
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
-    # Geometric ROI pass: cheaper than processing dozens of full-crop variants
-    # and often enough for tiny QR/barcodes in the right/bottom price-tag zones.
-    for img in _roi_variants(crop)[:roi_limit]:
+    for source, img in _named_roi_variants(crop, "qr")[:roi_limit]:
         for raw in _try_pyzbar(img) + _try_opencv(img):
             parsed = _raw_to_fields(raw)
             if parsed:
+                _log_success(
+                    debug_dir,
+                    track_id=track_id,
+                    timestamp_ms=timestamp_ms,
+                    source="qr_roi",
+                    raw=raw,
+                    normalized=_success_value(parsed),
+                    roi_type=source,
+                )
                 return parsed
 
     if _decode_mode() == "fast":
+        _save_failed_roi_examples(
+            debug_dir,
+            crop,
+            kind="qr",
+            track_id=track_id,
+            timestamp_ms=timestamp_ms,
+        )
         return {}
 
     full_limit = _variant_limit(default_full=10_000, default_fast=12)
-    for img in _image_variants(crop)[:full_limit]:
+    for idx, img in enumerate(_image_variants(crop)[:full_limit]):
         for raw in _try_pyzbar(img) + _try_opencv(img):
             parsed = _raw_to_fields(raw)
             if parsed:
+                _log_success(
+                    debug_dir,
+                    track_id=track_id,
+                    timestamp_ms=timestamp_ms,
+                    source="qr_full_variant",
+                    raw=raw,
+                    normalized=_success_value(parsed),
+                    roi_type=f"full:v{idx}",
+                )
                 return parsed
 
     # QReader is heavier; call it once per crop on the two most useful variants.
-    for img in _image_variants(crop)[:2]:
+    for idx, img in enumerate(_image_variants(crop)[:2]):
         for raw in _try_qreader(img):
             parsed = _raw_to_fields(raw)
             if parsed:
+                _log_success(
+                    debug_dir,
+                    track_id=track_id,
+                    timestamp_ms=timestamp_ms,
+                    source="qr_qreader",
+                    raw=raw,
+                    normalized=_success_value(parsed),
+                    roi_type=f"qreader:v{idx}",
+                )
                 return parsed
 
+    _save_failed_roi_examples(
+        debug_dir, crop, kind="qr", track_id=track_id, timestamp_ms=timestamp_ms
+    )
     return {}
 
 
-def decode_barcode(crop: np.ndarray) -> str:
-    """Read linear barcode from a crop. Returns a normalized string or ''."""
+def decode_barcode(
+    crop: np.ndarray,
+    *,
+    debug_dir: str | Path | None = None,
+    track_id: int | None = None,
+    timestamp_ms: float | None = None,
+) -> str:
+    """Read a linear barcode from a crop and return a validated EAN-13."""
     if crop is None or crop.size == 0 or _decode_mode() == "off":
         return ""
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
-    for img in _barcode_roi_variants(crop)[:roi_limit]:
+    for source, img in _named_roi_variants(crop, "barcode")[:roi_limit]:
         for raw in _try_pyzbar(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)
                 if normalized:
+                    _log_success(
+                        debug_dir,
+                        track_id=track_id,
+                        timestamp_ms=timestamp_ms,
+                        source="barcode_roi",
+                        raw=raw,
+                        normalized=normalized,
+                        roi_type=source,
+                    )
                     return normalized
     if _decode_mode() == "fast":
+        _save_failed_roi_examples(
+            debug_dir,
+            crop,
+            kind="barcode",
+            track_id=track_id,
+            timestamp_ms=timestamp_ms,
+        )
         return ""
     full_limit = _variant_limit(default_full=10_000, default_fast=12)
-    for img in _image_variants(crop)[:full_limit]:
+    for idx, img in enumerate(_image_variants(crop)[:full_limit]):
         for raw in _try_pyzbar(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)
                 if normalized:
+                    _log_success(
+                        debug_dir,
+                        track_id=track_id,
+                        timestamp_ms=timestamp_ms,
+                        source="barcode_full_variant",
+                        raw=raw,
+                        normalized=normalized,
+                        roi_type=f"full:v{idx}",
+                    )
                     return normalized
+    _save_failed_roi_examples(
+        debug_dir,
+        crop,
+        kind="barcode",
+        track_id=track_id,
+        timestamp_ms=timestamp_ms,
+    )
     return ""

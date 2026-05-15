@@ -33,7 +33,21 @@ logger = logging.getLogger(__name__)
 DATA_ROOT = Path("Данные")
 LABELED_NAMES = ["25_12-20", "25_2-10", "26_12-20", "43_15", "49_5"]
 
-EVAL_FIELDS = [
+QR_EVAL_FIELDS = {
+    "qr_code_barcode",
+    "price1_qr",
+    "price2_qr",
+    "price3_qr",
+    "price4_qr",
+    "wholesale_level_1_count",
+    "wholesale_level_1_price",
+    "wholesale_level_2_count",
+    "wholesale_level_2_price",
+    "action_price_qr",
+    "action_code_qr",
+}
+
+EVAL_FIELDS_FULL = [
     "product_name",
     "price_default",
     "price_card",
@@ -46,6 +60,13 @@ EVAL_FIELDS = [
     "price2_qr",
     "price4_qr",
 ]
+
+EVAL_FIELDS_NO_QR = [
+    field for field in EVAL_FIELDS_FULL if field not in QR_EVAL_FIELDS
+]
+
+# Для обратной совместимости старого вывода field_accuracy
+EVAL_FIELDS = EVAL_FIELDS_FULL
 
 
 def labeled_paths(data_root: Path) -> list[tuple[str, Path, Path]]:
@@ -128,6 +149,36 @@ def _present(val: Any) -> bool:
     return bool(s and s.lower() not in {"nan", "none"} and s != ABSENT_VALUE)
 
 
+def _gt_has_qr(gt_row: pd.Series) -> bool:
+    """Return True if GT row contains any real QR-related value."""
+    for field in QR_EVAL_FIELDS:
+        if field not in gt_row:
+            continue
+        value = str(gt_row.get(field, "")).strip()
+        if (
+            value
+            and value.lower() not in {"nan", "none"}
+            and value != ABSENT_VALUE
+        ):
+            return True
+    return False
+
+
+def _score_fields(
+    pred: dict[str, Any],
+    gt_row: pd.Series,
+    fields: list[str],
+) -> tuple[float, int]:
+    """Return row score and number of correct fields for selected fields."""
+    correct = 0
+    for field in fields:
+        if _field_match(
+            pred.get(field, ""), gt_row.get(field, ""), field=field
+        ):
+            correct += 1
+    return correct / max(1, len(fields)), correct
+
+
 def _extract_one(
     frame: cv2.Mat, row: pd.Series, ocr: OCREngine, ocr_ru: OCREngine | None
 ) -> dict[str, Any]:
@@ -194,46 +245,120 @@ def eval_video(
     """Evaluate one video using GT bboxes."""
     gt_df = _normalize_gt(pd.read_csv(csv_path, decimal=","))
     cap = cv2.VideoCapture(str(video_path))
-    scores: list[float] = []
-    field_hits: dict[str, int] = {f: 0 for f in EVAL_FIELDS}
+
+    scores_full: list[float] = []
+    scores_no_qr: list[float] = []
+    scores_no_qr_has_qr_gt: list[float] = []
+    scores_no_qr_no_qr_gt: list[float] = []
+
+    field_hits: dict[str, int] = {f: 0 for f in EVAL_FIELDS_FULL}
+    field_hits_no_qr: dict[str, int] = {f: 0 for f in EVAL_FIELDS_NO_QR}
     fill_hits: dict[str, int] = {f: 0 for f in OUTPUT_COLUMNS}
+
     barcode_count = 0
     qr_barcode_count = 0
+    gt_has_qr_count = 0
+    gt_no_qr_count = 0
 
     for _, gt_row in gt_df.iterrows():
         ts_ms = float(gt_row.get("frame_timestamp", 0))
         cap.set(cv2.CAP_PROP_POS_MSEC, ts_ms)
         ret, frame = cap.read()
+
         if not ret:
-            scores.append(0.0)
+            scores_full.append(0.0)
+            scores_no_qr.append(0.0)
+
+            if _gt_has_qr(gt_row):
+                gt_has_qr_count += 1
+                scores_no_qr_has_qr_gt.append(0.0)
+            else:
+                gt_no_qr_count += 1
+                scores_no_qr_no_qr_gt.append(0.0)
             continue
+
         pred = _extract_one(frame, gt_row, ocr, ocr_ru)
+
         barcode_count += int(_present(pred.get("barcode")))
         qr_barcode_count += int(_present(pred.get("qr_code_barcode")))
+
         for col in OUTPUT_COLUMNS:
             fill_hits[col] += int(_present(pred.get(col)))
-        correct = 0
-        for field in EVAL_FIELDS:
+
+        score_full, correct_full = _score_fields(
+            pred,
+            gt_row,
+            EVAL_FIELDS_FULL,
+        )
+        scores_full.append(score_full)
+
+        for field in EVAL_FIELDS_FULL:
             if _field_match(
                 pred.get(field, ""), gt_row.get(field, ""), field=field
             ):
-                correct += 1
                 field_hits[field] += 1
-        scores.append(correct / len(EVAL_FIELDS))
+
+        score_no_qr, correct_no_qr = _score_fields(
+            pred,
+            gt_row,
+            EVAL_FIELDS_NO_QR,
+        )
+        scores_no_qr.append(score_no_qr)
+
+        for field in EVAL_FIELDS_NO_QR:
+            if _field_match(
+                pred.get(field, ""), gt_row.get(field, ""), field=field
+            ):
+                field_hits_no_qr[field] += 1
+
+        if _gt_has_qr(gt_row):
+            gt_has_qr_count += 1
+            scores_no_qr_has_qr_gt.append(score_no_qr)
+        else:
+            gt_no_qr_count += 1
+            scores_no_qr_no_qr_gt.append(score_no_qr)
 
     cap.release()
+
     n_total = len(gt_df)
-    n_pass = sum(1 for s in scores if s >= 0.80)
+
+    n_pass_full = sum(1 for s in scores_full if s >= 0.80)
+    n_pass_no_qr = sum(1 for s in scores_no_qr if s >= 0.80)
+    n_pass_no_qr_has_qr_gt = sum(1 for s in scores_no_qr_has_qr_gt if s >= 0.80)
+    n_pass_no_qr_no_qr_gt = sum(1 for s in scores_no_qr_no_qr_gt if s >= 0.80)
+
     return {
         "video": name,
         "n_gt": n_total,
-        "n_pass": n_pass,
-        "metric": n_pass / max(1, n_total),
-        "avg_field": sum(scores) / max(1, len(scores)),
+        # Старый full-вариант
+        "n_pass": n_pass_full,
+        "metric": n_pass_full / max(1, n_total),
+        "avg_field": sum(scores_full) / max(1, len(scores_full)),
+        # Новый no-QR-вариант
+        "n_pass_no_qr": n_pass_no_qr,
+        "metric_no_qr": n_pass_no_qr / max(1, n_total),
+        "avg_field_no_qr": sum(scores_no_qr) / max(1, len(scores_no_qr)),
+        # no-QR по группам GT
+        "gt_has_qr_count": gt_has_qr_count,
+        "gt_no_qr_count": gt_no_qr_count,
+        "n_pass_no_qr_has_qr_gt": n_pass_no_qr_has_qr_gt,
+        "metric_no_qr_has_qr_gt": n_pass_no_qr_has_qr_gt
+        / max(1, gt_has_qr_count),
+        "avg_field_no_qr_has_qr_gt": (
+            sum(scores_no_qr_has_qr_gt) / max(1, len(scores_no_qr_has_qr_gt))
+        ),
+        "n_pass_no_qr_no_qr_gt": n_pass_no_qr_no_qr_gt,
+        "metric_no_qr_no_qr_gt": n_pass_no_qr_no_qr_gt / max(1, gt_no_qr_count),
+        "avg_field_no_qr_no_qr_gt": (
+            sum(scores_no_qr_no_qr_gt) / max(1, len(scores_no_qr_no_qr_gt))
+        ),
         "barcode_count": barcode_count,
         "qr_barcode_count": qr_barcode_count,
         "field_accuracy": {
-            f: field_hits[f] / max(1, n_total) for f in EVAL_FIELDS
+            f: field_hits[f] / max(1, n_total) for f in EVAL_FIELDS_FULL
+        },
+        "field_accuracy_no_qr": {
+            f: field_hits_no_qr[f] / max(1, n_total) for f in EVAL_FIELDS_NO_QR
         },
         "fill_rates": {
             f: fill_hits[f] / max(1, n_total) for f in OUTPUT_COLUMNS
@@ -245,19 +370,65 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate ceiling metrics."""
     total_gt = sum(r["n_gt"] for r in results)
     total_pass = sum(r["n_pass"] for r in results)
+    total_pass_no_qr = sum(r["n_pass_no_qr"] for r in results)
+
+    total_gt_has_qr = sum(r["gt_has_qr_count"] for r in results)
+    total_gt_no_qr = sum(r["gt_no_qr_count"] for r in results)
+
+    total_pass_no_qr_has_qr_gt = sum(
+        r["n_pass_no_qr_has_qr_gt"] for r in results
+    )
+    total_pass_no_qr_no_qr_gt = sum(r["n_pass_no_qr_no_qr_gt"] for r in results)
+
     return {
         "videos": results,
         "overall": {
             "n_gt": total_gt,
+            # Full metric
             "metric_80": total_pass / max(1, total_gt),
             "avg_field": sum(r["avg_field"] * r["n_gt"] for r in results)
             / max(1, total_gt),
+            "n_pass": total_pass,
+            # No-QR metric
+            "metric_80_no_qr": total_pass_no_qr / max(1, total_gt),
+            "avg_field_no_qr": sum(
+                r["avg_field_no_qr"] * r["n_gt"] for r in results
+            )
+            / max(1, total_gt),
+            "n_pass_no_qr": total_pass_no_qr,
+            # No-QR metric for GT rows with QR
+            "gt_has_qr_count": total_gt_has_qr,
+            "metric_80_no_qr_has_qr_gt": total_pass_no_qr_has_qr_gt
+            / max(1, total_gt_has_qr),
+            "avg_field_no_qr_has_qr_gt": sum(
+                r["avg_field_no_qr_has_qr_gt"] * r["gt_has_qr_count"]
+                for r in results
+            )
+            / max(1, total_gt_has_qr),
+            "n_pass_no_qr_has_qr_gt": total_pass_no_qr_has_qr_gt,
+            # No-QR metric for GT rows without QR
+            "gt_no_qr_count": total_gt_no_qr,
+            "metric_80_no_qr_no_qr_gt": total_pass_no_qr_no_qr_gt
+            / max(1, total_gt_no_qr),
+            "avg_field_no_qr_no_qr_gt": sum(
+                r["avg_field_no_qr_no_qr_gt"] * r["gt_no_qr_count"]
+                for r in results
+            )
+            / max(1, total_gt_no_qr),
+            "n_pass_no_qr_no_qr_gt": total_pass_no_qr_no_qr_gt,
             "barcode_count": sum(r["barcode_count"] for r in results),
             "qr_barcode_count": sum(r["qr_barcode_count"] for r in results),
             "field_accuracy": {
                 f: sum(r["field_accuracy"][f] * r["n_gt"] for r in results)
                 / max(1, total_gt)
-                for f in EVAL_FIELDS
+                for f in EVAL_FIELDS_FULL
+            },
+            "field_accuracy_no_qr": {
+                f: sum(
+                    r["field_accuracy_no_qr"][f] * r["n_gt"] for r in results
+                )
+                / max(1, total_gt)
+                for f in EVAL_FIELDS_NO_QR
             },
         },
     }
@@ -266,19 +437,54 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
 def print_summary(summary: dict[str, Any]) -> None:
     """Print a human-readable ceiling report."""
     print("\n=== Ceiling (GT bboxes, production OCR) ===")
+
     for r in summary["videos"]:
         print(
-            f"  {r['video']:15s}: metric@80%={r['metric']:.3f}  "
-            f"avg_field={r['avg_field']:.3f}  pass={r['n_pass']}/{r['n_gt']} "
+            f"  {r['video']:15s}: "
+            f"full={r['metric']:.3f} avg={r['avg_field']:.3f} "
+            f"pass={r['n_pass']}/{r['n_gt']} | "
+            f"no_qr={r['metric_no_qr']:.3f} avg_no_qr={r['avg_field_no_qr']:.3f} "
+            f"pass_no_qr={r['n_pass_no_qr']}/{r['n_gt']} | "
             f"bc={r['barcode_count']} qr_bc={r['qr_barcode_count']}"
         )
+
     o = summary["overall"]
+
+    print("\n=== OVERALL ===")
     print(
-        f"\n  OVERALL metric@80%: {o['metric_80']:.3f}  avg_field={o['avg_field']:.3f} "
+        f"  FULL      metric@80%={o['metric_80']:.3f}  "
+        f"avg_field={o['avg_field']:.3f}  "
+        f"pass={o['n_pass']}/{o['n_gt']}  "
         f"bc={o['barcode_count']} qr_bc={o['qr_barcode_count']}"
     )
-    print("\n=== Точность по полям (weighted avg) ===")
+
+    print(
+        f"  NO-QR     metric@80%={o['metric_80_no_qr']:.3f}  "
+        f"avg_field={o['avg_field_no_qr']:.3f}  "
+        f"pass={o['n_pass_no_qr']}/{o['n_gt']}"
+    )
+
+    print("\n=== NO-QR metric by GT QR availability ===")
+    print(
+        f"  GT has QR : metric@80%={o['metric_80_no_qr_has_qr_gt']:.3f}  "
+        f"avg_field={o['avg_field_no_qr_has_qr_gt']:.3f}  "
+        f"pass={o['n_pass_no_qr_has_qr_gt']}/{o['gt_has_qr_count']}"
+    )
+    print(
+        f"  GT no QR  : metric@80%={o['metric_80_no_qr_no_qr_gt']:.3f}  "
+        f"avg_field={o['avg_field_no_qr_no_qr_gt']:.3f}  "
+        f"pass={o['n_pass_no_qr_no_qr_gt']}/{o['gt_no_qr_count']}"
+    )
+
+    print("\n=== Точность по полям FULL (weighted avg) ===")
     for field, acc in sorted(o["field_accuracy"].items(), key=lambda kv: kv[1]):
+        bar = "█" * int(acc * 20)
+        print(f"  {field:<28} {acc:>7.3f}  {bar}")
+
+    print("\n=== Точность по полям NO-QR (weighted avg) ===")
+    for field, acc in sorted(
+        o["field_accuracy_no_qr"].items(), key=lambda kv: kv[1]
+    ):
         bar = "█" * int(acc * 20)
         print(f"  {field:<28} {acc:>7.3f}  {bar}")
 
@@ -303,7 +509,13 @@ def append_metrics_md(summary: dict[str, Any]) -> None:
     with open("docs/METRICS.md", "a", encoding="utf-8") as f:
         f.write(
             f"| {today} | {commit} | ceiling (GT bboxes) | {o['metric_80']:.3f} | "
-            f"avg_field={o['avg_field']:.3f}; bc={o['barcode_count']}; qr_bc={o['qr_barcode_count']}; {per_video} |\n"
+            f"avg_field={o['avg_field']:.3f}; "
+            f"no_qr={o['metric_80_no_qr']:.3f}; "
+            f"avg_no_qr={o['avg_field_no_qr']:.3f}; "
+            f"has_qr_no_qr={o['metric_80_no_qr_has_qr_gt']:.3f}; "
+            f"no_qr_gt_no_qr={o['metric_80_no_qr_no_qr_gt']:.3f}; "
+            f"bc={o['barcode_count']}; qr_bc={o['qr_barcode_count']}; "
+            f"{per_video} |\n"
         )
 
 
