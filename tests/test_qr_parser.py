@@ -78,7 +78,9 @@ def test_all_price_fields():
 
 def test_realistic_lenta_qr():
     """Пример реального формата QR-кода Ленты."""
-    url = "https://lenta.ru/product?b=4670025474665&p1=252.63&p2=239.99&p4=129.99"
+    url = (
+        "https://lenta.ru/product?b=4670025474665&p1=252.63&p2=239.99&p4=129.99"
+    )
     result = parse_qr_url(url)
     assert result["qr_code_barcode"] == "4670025474665"
     assert result["price1_qr"] == "252.63"
@@ -86,3 +88,12 @@ def test_realistic_lenta_qr():
     assert result["price4_qr"] == "129.99"
     # p3 отсутствует → не должен быть в результате
     assert "price3_qr" not in result
+
+
+def test_qr_keys_case_insensitive():
+    url = "https://x?Barcode=4607124143901&Price1=100.00&WL1C=3&ActionCode=A1"
+    result = parse_qr_url(url)
+    assert result["qr_code_barcode"] == "4607124143901"
+    assert result["price1_qr"] == "100.00"
+    assert result["wholesale_level_1_count"] == "3"
+    assert result["action_code_qr"] == "A1"

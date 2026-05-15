@@ -26,9 +26,21 @@ logger = logging.getLogger(__name__)
 DATA_ROOT = Path("Данные")
 
 LABELED = [
-    ("25_12-20", DATA_ROOT / "25_12-20" / "25_12-20.mp4", DATA_ROOT / "25_12-20" / "25_12-20.csv"),
-    ("26_12-20", DATA_ROOT / "26_12-20" / "26_12-20.mp4", DATA_ROOT / "26_12-20" / "26_12-20.csv"),
-    ("43_15", DATA_ROOT / "43_15" / "43_15.mp4", DATA_ROOT / "43_15" / "43_15.csv"),
+    (
+        "25_12-20",
+        DATA_ROOT / "25_12-20" / "25_12-20.mp4",
+        DATA_ROOT / "25_12-20" / "25_12-20.csv",
+    ),
+    (
+        "26_12-20",
+        DATA_ROOT / "26_12-20" / "26_12-20.mp4",
+        DATA_ROOT / "26_12-20" / "26_12-20.csv",
+    ),
+    (
+        "43_15",
+        DATA_ROOT / "43_15" / "43_15.mp4",
+        DATA_ROOT / "43_15" / "43_15.csv",
+    ),
 ]
 
 # Поля для оценки (исключаем координаты, timestamp и filename)
@@ -50,7 +62,9 @@ EVAL_FIELDS = [
 def _normalize_gt(df: pd.DataFrame) -> pd.DataFrame:
     """Нормализовать GT CSV: исправить опечатку имени столбца, decimal."""
     if "wholesale_level_1_coun" in df.columns:
-        df = df.rename(columns={"wholesale_level_1_coun": "wholesale_level_1_count"})
+        df = df.rename(
+            columns={"wholesale_level_1_coun": "wholesale_level_1_count"}
+        )
     # barcode как строка (в GT хранится как float)
     for col in ["barcode", "qr_code_barcode"]:
         if col in df.columns:
@@ -198,7 +212,9 @@ def main(videos: list[str] | None = None, interval_ms: int = 500) -> None:
         gt_df = _normalize_gt(pd.read_csv(gt_path, decimal=","))
 
         # Прогон пайплайна
-        pred_df = pipeline.run(video_path, interval_ms=interval_ms, adaptive=False, min_hits=2)
+        pred_df = pipeline.run(
+            video_path, interval_ms=interval_ms, adaptive=False, min_hits=2
+        )
 
         # Оценка
         scores = match_and_score(pred_df, gt_df)
@@ -236,7 +252,9 @@ def main(videos: list[str] | None = None, interval_ms: int = 500) -> None:
     # Запись в METRICS.md
     import subprocess
 
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    commit = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
     from datetime import date
 
     today = date.today().isoformat()
@@ -252,8 +270,17 @@ def main(videos: list[str] | None = None, interval_ms: int = 500) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Оценка пайплайна на размеченных видео")
-    parser.add_argument("--videos", nargs="*", default=None, help="Список видео (25_12-20 26_12-20 43_15)")
-    parser.add_argument("--interval", type=int, default=500, help="Интервал семплирования (мс)")
+    parser = argparse.ArgumentParser(
+        description="Оценка пайплайна на размеченных видео"
+    )
+    parser.add_argument(
+        "--videos",
+        nargs="*",
+        default=None,
+        help="Список видео (25_12-20 26_12-20 43_15)",
+    )
+    parser.add_argument(
+        "--interval", type=int, default=500, help="Интервал семплирования (мс)"
+    )
     args = parser.parse_args()
     main(videos=args.videos, interval_ms=args.interval)

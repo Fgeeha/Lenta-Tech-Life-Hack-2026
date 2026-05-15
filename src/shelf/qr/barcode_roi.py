@@ -19,6 +19,7 @@ _DIGITS_RE = re.compile(r"\d+")
 # EAN-13 utilities
 # ---------------------------------------------------------------------------
 
+
 def ean13_checksum_valid(s: str) -> bool:
     """Return True if s is a valid 13-digit EAN-13 string."""
     if len(s) != 13 or not s.isdigit():
@@ -62,7 +63,7 @@ def ean13_repair(raw: str) -> str | None:
             for d in "0123456789":
                 if d == s[i]:
                     continue
-                cand = s[:i] + d + s[i + 1:]
+                cand = s[:i] + d + s[i + 1 :]
                 if ean13_checksum_valid(cand):
                     return cand
 
@@ -73,6 +74,7 @@ def ean13_repair(raw: str) -> str | None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _to_gray(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
 
@@ -80,6 +82,7 @@ def _to_gray(img: np.ndarray) -> np.ndarray:
 def _pyzbar_decode(img: np.ndarray) -> list[str]:
     try:
         from pyzbar import pyzbar  # type: ignore
+
         decoded = pyzbar.decode(img)
         return [
             d.data.decode("utf-8", errors="ignore")
@@ -95,15 +98,22 @@ def _preprocess_variants(img: np.ndarray) -> list[np.ndarray]:
     gray = _to_gray(img)
     variants: list[np.ndarray] = [img]
     _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR) if img.ndim == 3 else otsu)
-    _, inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    variants.append(cv2.cvtColor(inv, cv2.COLOR_GRAY2BGR) if img.ndim == 3 else inv)
+    variants.append(
+        cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR) if img.ndim == 3 else otsu
+    )
+    _, inv = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+    variants.append(
+        cv2.cvtColor(inv, cv2.COLOR_GRAY2BGR) if img.ndim == 3 else inv
+    )
     return variants
 
 
 # ---------------------------------------------------------------------------
 # ROI finder
 # ---------------------------------------------------------------------------
+
 
 def find_barcode_strip(img: np.ndarray) -> tuple[int, int, int, int] | None:
     """Locate the barcode region in a preprocessed price-tag crop.
@@ -124,7 +134,9 @@ def find_barcode_strip(img: np.ndarray) -> tuple[int, int, int, int] | None:
     closed = cv2.morphologyEx(abs_x, cv2.MORPH_CLOSE, kernel)
     _, thresh = cv2.threshold(closed, 30, 255, cv2.THRESH_BINARY)
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(
+        thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
     candidates: list[tuple[int, int, int, int, int]] = []
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
@@ -142,6 +154,7 @@ def find_barcode_strip(img: np.ndarray) -> tuple[int, int, int, int] | None:
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 def read_barcode_from_strip(proc_crop: np.ndarray) -> str:
     """Try to read EAN-13 from a preprocessed (upscaled, rotated) price-tag crop.
@@ -176,7 +189,11 @@ def read_barcode_from_strip(proc_crop: np.ndarray) -> str:
         if roi_crop.size > 0:
             for scale in (2, 3, 4):
                 big = cv2.resize(
-                    roi_crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
+                    roi_crop,
+                    None,
+                    fx=scale,
+                    fy=scale,
+                    interpolation=cv2.INTER_CUBIC,
                 )
                 for variant in _preprocess_variants(big):
                     for raw in _pyzbar_decode(variant):

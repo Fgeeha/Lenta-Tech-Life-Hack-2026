@@ -30,12 +30,16 @@ def main() -> None:
     detector = PriceTagDetector()
     total_dets = 0
 
-    for i, (ts, frame) in enumerate(sample_frames(args.video, interval_ms=1000, adaptive=False)):
+    for i, (ts, frame) in enumerate(
+        sample_frames(args.video, interval_ms=1000, adaptive=False)
+    ):
         if i >= args.n:
             break
         dets = detector.detect(frame)
         total_dets += len(dets)
-        print(f"  t={ts:.1f}s → {len(dets)} детекций: {[(d.cls_name, round(d.confidence, 2)) for d in dets]}")
+        print(
+            f"  t={ts:.1f}s → {len(dets)} детекций: {[(d.cls_name, round(d.confidence, 2)) for d in dets]}"
+        )
 
         vis = detector.visualize(frame, dets)
         h, w = vis.shape[:2]
@@ -44,7 +48,9 @@ def main() -> None:
         out_path = out_dir / f"frame_{i:02d}_{ts:.1f}s.jpg"
         cv2.imwrite(str(out_path), vis_small, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-    print(f"\nИтого {total_dets} детекций на {min(i + 1, args.n)} кадрах. Результаты: {out_dir}")
+    print(
+        f"\nИтого {total_dets} детекций на {min(i + 1, args.n)} кадрах. Результаты: {out_dir}"
+    )
 
 
 if __name__ == "__main__":

@@ -32,14 +32,20 @@ _COLOR_RANGES = {
 # Ключевые слова для классификации механики
 _DISCOUNT_PCT_RE = re.compile(r"-\s*\d+\s*%")
 _DISCOUNT_RUB_RE = re.compile(r"-\s*\d+\s*[рр₽Р]")
-_BOGOF_RE = re.compile(r"[23]\s*[=+]\s*[12]|при покупке|бесплатно", re.IGNORECASE)
+_BOGOF_RE = re.compile(
+    r"[23]\s*[=+]\s*[12]|при покупке|бесплатно", re.IGNORECASE
+)
 _FROM_N_RE = re.compile(r"от\s*\d+", re.IGNORECASE)
 _CARD_RE = re.compile(r"карт|по карте|с картой", re.IGNORECASE)
 
 
 def classify_color(crop: np.ndarray) -> str:
-    """Определить доминирующий цвет ценника по HSV-гистограмме."""
-    if crop.size == 0:
+    """Определить доминирующий цвет ценника по HSV-гистограмме.
+
+    Возвращает red/yellow/green/white/black. Для слабого цветового сигнала
+    смотрим яркость: так белые регулярные ценники не становятся случайно yellow.
+    """
+    if crop is None or crop.size == 0:
         return "white"
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     best_color = "white"
@@ -52,7 +58,10 @@ def classify_color(crop: np.ndarray) -> str:
         if frac > best_frac:
             best_frac = frac
             best_color = color
-    return best_color
+    if best_frac >= 0.08:
+        return best_color
+    v_mean = float(hsv[..., 2].mean())
+    return "black" if v_mean < 70 else "white"
 
 
 def classify_mechanic(texts: list[str]) -> str:

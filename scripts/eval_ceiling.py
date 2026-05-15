@@ -27,10 +27,26 @@ logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("Данные")
 LABELED = [
-    ("25_12-20", DATA_ROOT / "25_12-20" / "25_12-20.mp4", DATA_ROOT / "25_12-20" / "25_12-20.csv"),
-    ("25_2-10", DATA_ROOT / "25_2-10" / "25_2-10.mp4", DATA_ROOT / "25_2-10" / "25_2-10.csv"),
-    ("26_12-20", DATA_ROOT / "26_12-20" / "26_12-20.mp4", DATA_ROOT / "26_12-20" / "26_12-20.csv"),
-    ("43_15", DATA_ROOT / "43_15" / "43_15.mp4", DATA_ROOT / "43_15" / "43_15.csv"),
+    (
+        "25_12-20",
+        DATA_ROOT / "25_12-20" / "25_12-20.mp4",
+        DATA_ROOT / "25_12-20" / "25_12-20.csv",
+    ),
+    (
+        "25_2-10",
+        DATA_ROOT / "25_2-10" / "25_2-10.mp4",
+        DATA_ROOT / "25_2-10" / "25_2-10.csv",
+    ),
+    (
+        "26_12-20",
+        DATA_ROOT / "26_12-20" / "26_12-20.mp4",
+        DATA_ROOT / "26_12-20" / "26_12-20.csv",
+    ),
+    (
+        "43_15",
+        DATA_ROOT / "43_15" / "43_15.mp4",
+        DATA_ROOT / "43_15" / "43_15.csv",
+    ),
     ("49_5", DATA_ROOT / "49_5" / "49_5.mp4", DATA_ROOT / "49_5" / "49_5.csv"),
 ]
 
@@ -51,7 +67,9 @@ EVAL_FIELDS = [
 
 def _normalize_gt(df: pd.DataFrame) -> pd.DataFrame:
     if "wholesale_level_1_coun" in df.columns:
-        df = df.rename(columns={"wholesale_level_1_coun": "wholesale_level_1_count"})
+        df = df.rename(
+            columns={"wholesale_level_1_coun": "wholesale_level_1_count"}
+        )
     # Strip trailing spaces from filename (43_15 GT has "43_15.mp4 ")
     if "filename" in df.columns:
         df["filename"] = df["filename"].str.strip()
@@ -117,7 +135,12 @@ def _extract_one(
     frame: cv2.Mat, row: pd.Series, ocr: OCREngine, ocr_ru: OCREngine | None
 ) -> dict:
     """OCR + parse на одном GT-bbox. Возвращает dict поле→значение."""
-    x1, y1, x2, y2 = int(row.x_min), int(row.y_min), int(row.x_max), int(row.y_max)
+    x1, y1, x2, y2 = (
+        int(row.x_min),
+        int(row.y_min),
+        int(row.x_max),
+        int(row.y_max),
+    )
     h, w = frame.shape[:2]
     # Margin +10% для захвата полного ценника
     mx = max(5, int((x2 - x1) * 0.10))
@@ -130,14 +153,26 @@ def _extract_one(
 
     # QR (все ориентации)
     qr_fields: dict[str, str] = {}
-    for rot in [cv2.ROTATE_90_COUNTERCLOCKWISE, None, cv2.ROTATE_180, cv2.ROTATE_90_CLOCKWISE]:
+    for rot in [
+        cv2.ROTATE_90_COUNTERCLOCKWISE,
+        None,
+        cv2.ROTATE_180,
+        cv2.ROTATE_90_CLOCKWISE,
+    ]:
         img = cv2.rotate(crop_raw, rot) if rot is not None else crop_raw
         qr_fields = decode_qr(img)
         if qr_fields:
             break
 
     color = classify_color(crop_raw)
-    proc = preprocess_crop(crop_raw, rotate_180=True, deskew=True, upscale=2, sharpen=False, clahe=False)
+    proc = preprocess_crop(
+        crop_raw,
+        rotate_180=True,
+        deskew=True,
+        upscale=2,
+        sharpen=False,
+        clahe=False,
+    )
     ocr_lines = ocr.run(proc)
 
     ocr_tag = parse_ocr_result(
@@ -155,7 +190,11 @@ def _extract_one(
 
 
 def eval_video(
-    name: str, video_path: Path, csv_path: Path, ocr: OCREngine, ocr_ru: OCREngine | None
+    name: str,
+    video_path: Path,
+    csv_path: Path,
+    ocr: OCREngine,
+    ocr_ru: OCREngine | None,
 ) -> dict:
     gt_df = _normalize_gt(pd.read_csv(csv_path, decimal=","))
     cap = cv2.VideoCapture(str(video_path))
@@ -193,12 +232,14 @@ def eval_video(
         "n_pass": n_pass,
         "metric": n_pass / max(1, n_total),
         "avg_field": avg,
-        "field_accuracy": {f: field_hits[f] / max(1, n_total) for f in EVAL_FIELDS},
+        "field_accuracy": {
+            f: field_hits[f] / max(1, n_total) for f in EVAL_FIELDS
+        },
     }
 
 
 def main() -> None:
-    ocr = OCREngine()                               # EN/PaddleOCR: цифры, цены
+    ocr = OCREngine()  # EN/PaddleOCR: цифры, цены
     ocr_ru = OCREngine(lang="ru", force_easyocr=True)  # EasyOCR RU+EN: названия
     results = []
     all_field_acc: dict[str, list[float]] = {f: [] for f in EVAL_FIELDS}
@@ -237,11 +278,15 @@ def main() -> None:
     import subprocess
     from datetime import date
 
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    commit = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
     today = date.today().isoformat()
     per_video = "  ".join(f"{r['video']}={r['metric']:.3f}" for r in results)
     with open("docs/METRICS.md", "a") as f:
-        f.write(f"| {today} | {commit} | ceiling (GT bboxes) | {overall:.3f} | {per_video} |\n")
+        f.write(
+            f"| {today} | {commit} | ceiling (GT bboxes) | {overall:.3f} | {per_video} |\n"
+        )
     print("\n  Метрика записана в docs/METRICS.md")
 
 

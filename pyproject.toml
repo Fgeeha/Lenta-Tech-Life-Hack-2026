@@ -8,21 +8,23 @@ packages = [{include = "shelf", from = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
-opencv-python-headless = "^4.10"
-pandas = "^2.2"
-gradio = ">=5.28,<6"
-Pillow = ">=10.4"
-easyocr = "^1.7.2"
+opencv-python-headless = ">=4.8,<5"
+numpy = ">=1.24,<3"
+pandas = ">=2.0,<3"
+gradio = ">=5.0,<6"
+Pillow = ">=10,<12"
+easyocr = ">=1.7,<2"
 
 [tool.poetry.group.ml.dependencies]
-ultralytics = "^8.3"
-supervision = "^0.23"
-pyzbar = "^0.1.9"
-qreader = "^3.8"
+ultralytics = ">=8.2,<9"
+supervision = ">=0.22,<1"
+pyzbar = ">=0.1.9,<1"
+qreader = ">=3.8,<4"
+huggingface-hub = ">=0.24,<2"
 
 [tool.poetry.group.ocr.dependencies]
-paddleocr = "^2.7"
-paddlepaddle = "^2.6"
+paddleocr = {version = ">=2.7,<3", python = "<3.13"}
+paddlepaddle = {version = ">=2.6,<4", python = "<3.13"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
@@ -30,7 +32,7 @@ ruff = ">=0.6"
 black = "^24.8"
 
 [tool.ruff]
-line-length = 120
+line-length = 80
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -38,7 +40,7 @@ select = ["E", "F", "I"]
 ignore = ["E501"]
 
 [tool.black]
-line-length = 120
+line-length = 80
 target-version = ["py310"]
 
 [tool.pytest.ini_options]

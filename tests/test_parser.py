@@ -75,3 +75,16 @@ def test_parse_no_percent_no_discount():
     lines = _fake_ocr(["299", "399", "Мёд"])
     tag = parse_ocr_result(lines, bbox=(0, 0, 200, 200))
     assert tag.discount_amount == "нет"
+
+
+def test_sku_12_digits_not_misclassified_as_barcode():
+    lines = _fake_ocr(["270108726573", "129", "252"])
+    tag = parse_ocr_result(lines, bbox=(0, 0, 200, 200))
+    assert tag.id_sku == "270108726573"
+    assert tag.barcode == ""
+
+
+def test_valid_ean13_barcode_is_extracted():
+    lines = _fake_ocr(["4607124143901", "129", "252"])
+    tag = parse_ocr_result(lines, bbox=(0, 0, 200, 200))
+    assert tag.barcode == "4607124143901"

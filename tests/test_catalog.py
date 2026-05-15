@@ -1,6 +1,6 @@
 """Tests for SKU barcode→product_name catalog lookup."""
 
-from shelf.postproc.catalog import lookup_product_name, catalog_size
+from shelf.postproc.catalog import catalog_size, lookup_product_name
 
 
 def test_catalog_loads():

@@ -49,15 +49,21 @@ def main() -> None:
         print("Создать: https://huggingface.co/settings/tokens")
         sys.exit(1)
 
-    from huggingface_hub import HfApi, create_repo, upload_file, whoami
+    from huggingface_hub import create_repo, upload_file, whoami
 
-    api = HfApi(token=token)
+    # api = HfApi(token=token)
     username = whoami(token=token)["name"]
     print(f"HF user: {username}")
 
     # --- 1. Модель → отдельный model repo ---
     model_repo_id = f"{username}/{MODEL_REPO_SUFFIX}"
-    create_repo(model_repo_id, repo_type="model", private=False, token=token, exist_ok=True)
+    create_repo(
+        model_repo_id,
+        repo_type="model",
+        private=False,
+        token=token,
+        exist_ok=True,
+    )
     if MODEL_WEIGHTS.exists():
         print(f"Загружаем {MODEL_WEIGHTS}...")
         upload_file(
@@ -73,7 +79,10 @@ def main() -> None:
     # --- 2. Обновить HF_MODEL_REPO в yolo_sahi.py ---
     sahi_path = Path("src/shelf/detect/yolo_sahi.py")
     content = sahi_path.read_text()
-    if f'HF_MODEL_REPO = "fgeeha/{MODEL_REPO_SUFFIX}"' in content and username != "fgeeha":
+    if (
+        f'HF_MODEL_REPO = "fgeeha/{MODEL_REPO_SUFFIX}"' in content
+        and username != "fgeeha"
+    ):
         sahi_path.write_text(
             content.replace(
                 f'HF_MODEL_REPO = "fgeeha/{MODEL_REPO_SUFFIX}"',
@@ -85,8 +94,12 @@ def main() -> None:
     # --- 3. Space → upload файлов через API (без git, без истории) ---
     space_repo_id = f"{username}/{SPACE_NAME}"
     create_repo(
-        space_repo_id, repo_type="space", space_sdk=SPACE_SDK,
-        private=False, token=token, exist_ok=True,
+        space_repo_id,
+        repo_type="space",
+        space_sdk=SPACE_SDK,
+        private=False,
+        token=token,
+        exist_ok=True,
     )
     print(f"Space: https://huggingface.co/spaces/{space_repo_id}")
 
@@ -108,10 +121,12 @@ def main() -> None:
         )
         print(f"  ✓ {rel_path}")
 
-    print(f"\nДеплой завершён!")
+    print("\nДеплой завершён!")
     print(f"Space:  https://huggingface.co/spaces/{space_repo_id}")
     print(f"Model:  https://huggingface.co/{model_repo_id}")
-    print("\nОткрой Space в инкогнито, дождись сборки (~3 мин) и загрузи видео!")
+    print(
+        "\nОткрой Space в инкогнито, дождись сборки (~3 мин) и загрузи видео!"
+    )
 
 
 if __name__ == "__main__":
