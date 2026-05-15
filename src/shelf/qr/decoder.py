@@ -130,6 +130,27 @@ def decode_qr(crop: np.ndarray) -> dict[str, str]:
                     results.update(parsed)
                     return results  # нашли — выходим
 
+    # SR fallback: Real-ESRGAN x4 on small crops (SHELF_USE_SR=true only).
+    # Typical QR zone is ~20-30 px — borderline for pyzbar. SR pushes it to ~80-120 px.
+    if not results:
+        from shelf.sr.realesrgan import is_enabled, upscale_roi
+        if is_enabled():
+            h, w = crop.shape[:2]
+            if max(h, w) < 600:  # applies to typical price-tag crops (~220-300px)
+                sr_crop = upscale_roi(crop, outscale=4)
+                gray_sr = cv2.cvtColor(sr_crop, cv2.COLOR_BGR2GRAY)
+                _, thresh_sr = cv2.threshold(
+                    gray_sr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                )
+                thresh_bgr_sr = cv2.cvtColor(thresh_sr, cv2.COLOR_GRAY2BGR)
+                for img_v in [sr_crop, thresh_bgr_sr]:
+                    for raw in _try_pyzbar(img_v) + _try_opencv(img_v):
+                        if raw.isdigit() and 8 <= len(raw) <= 15:
+                            return {"qr_code_barcode": raw}
+                        parsed = parse_qr_url(raw)
+                        if parsed:
+                            return parsed
+
     return results
 
 
