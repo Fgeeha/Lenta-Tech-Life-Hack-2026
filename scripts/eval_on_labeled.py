@@ -520,6 +520,30 @@ def main() -> None:
         print("No labeled videos were evaluated. Missing expected files:")
         for line in missing:
             print(f"  - {line}")
+        if args.json_out:
+            args.json_out.write_text(
+                json.dumps(
+                    {
+                        "rows": 0,
+                        "videos": [],
+                        "missing": missing,
+                        "overall": {
+                            "n_gt": 0,
+                            "n_pred": 0,
+                            "n_matched": 0,
+                            "detection_recall": None,
+                            "metric_80": None,
+                            "avg_field": None,
+                            "barcode_count": 0,
+                            "qr_barcode_count": 0,
+                            "fill_rates": fill_rates(pd.DataFrame()),
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
         return
 
     summary = summarize(results, eval_fields)

@@ -18,27 +18,86 @@ TILED_WEIGHTS = "models/pricetag_tiled_yolov8n.pt"
 HF_MODEL_REPO = "fgeeha/shelf-pricetag-yolov8n"
 HF_MODEL_FILE = "pricetag_tiled_yolov8n.pt"
 
+# Local trained weights that are sometimes bundled in challenge archives.  These
+# paths keep inference fully local and avoid silently downloading a model.
+_LOCAL_WEIGHT_CANDIDATES = (
+    TILED_WEIGHTS,
+    "runs/detect/runs/detect/pricetag_tiled_v1/weights/best.pt",
+    "runs/detect/runs/detect/pricetag_tiled_v1/weights/last.pt",
+    "runs/detect/runs/detect/pricetag_v1/weights/best.pt",
+    "runs/detect/runs/detect/pricetag_v1/weights/last.pt",
+)
+
+
+def _env_true(name: str, default: str = "false") -> bool:
+    """Return True for truthy environment switches."""
+    import os
+
+    return os.getenv(name, default).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _candidate_weight_paths(path: str) -> list[Path]:
+    """Return local weight candidates in priority order without duplicates."""
+    import os
+
+    raw: list[str] = []
+    env_path = os.getenv("SHELF_YOLO_WEIGHTS", "").strip()
+    if env_path:
+        raw.append(env_path)
+    raw.append(path)
+    raw.extend(_LOCAL_WEIGHT_CANDIDATES)
+
+    seen: set[str] = set()
+    out: list[Path] = []
+    for item in raw:
+        p = Path(item)
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
 
 def _ensure_weights(path: str) -> str | None:
-    """Return trained weights path or None.
+    """Return a local trained weights path or None.
 
-    We intentionally do not fall back to generic COCO ``yolov8n.pt``: it produces
-    confident but irrelevant objects and hurts downstream OCR.
+    The detector never falls back to generic COCO ``yolov8n.pt`` and, by default,
+    never downloads anything from the network.  To opt into downloading trained
+    weights for a local experiment, set ``SHELF_ALLOW_MODEL_DOWNLOAD=true``.
     """
+    for candidate in _candidate_weight_paths(path):
+        if candidate.exists():
+            logger.info("Using local YOLO weights: %s", candidate)
+            return str(candidate)
+
     p = Path(path)
-    if p.exists():
-        return str(p)
+    if not _env_true("SHELF_ALLOW_MODEL_DOWNLOAD"):
+        logger.warning(
+            "Trained YOLO weights unavailable locally. Place weights at %s or set "
+            "SHELF_YOLO_WEIGHTS; using hybrid/mser fallback.",
+            p,
+        )
+        return None
+
     try:
         from huggingface_hub import hf_hub_download
 
-        logger.info("Скачиваем веса с HF Hub: %s", HF_MODEL_REPO)
+        logger.info(
+            "Downloading trained YOLO weights from HF Hub: %s", HF_MODEL_REPO
+        )
         p.parent.mkdir(parents=True, exist_ok=True)
         downloaded = hf_hub_download(
             repo_id=HF_MODEL_REPO,
             filename=HF_MODEL_FILE,
             local_dir=str(p.parent),
         )
-        logger.info("Веса скачаны: %s", downloaded)
+        logger.info("Weights downloaded: %s", downloaded)
         return downloaded
     except Exception as exc:
         logger.warning(

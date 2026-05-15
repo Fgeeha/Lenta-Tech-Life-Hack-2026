@@ -68,6 +68,21 @@ def _iou(a: Detection, b: Detection) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer env override for lightweight local runs."""
+    import os
+
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %d", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
 def _nms(dets: list[Detection], iou_thr: float = 0.35) -> list[Detection]:
     if not dets:
         return []
@@ -96,13 +111,17 @@ class MSERDetector:
 
     def __init__(
         self,
-        process_width: int = 1440,
+        process_width: int | None = None,
         delta: int = 5,
         min_area_scaled: int = 650,
         max_area_scaled: int = 18_000,
         max_variation: float = 0.35,
     ):
-        self.process_width = process_width
+        self.process_width = (
+            process_width
+            if process_width is not None
+            else _env_int("SHELF_MSER_PROCESS_WIDTH", 1440)
+        )
         self._mser = cv2.MSER_create(
             delta=delta,
             min_area=min_area_scaled,

@@ -109,9 +109,51 @@ http://localhost:7860
 models/pricetag_tiled_yolov8n.pt
 ```
 
-Если веса отсутствуют, режим `hybrid` автоматически использует MSER fallback.
+Также `yolo-tiled`/`hybrid` автоматически ищет локальные веса, если они уже лежат в challenge-архиве:
 
-Это позволяет проекту запускаться локально и в Docker даже без обученной модели, но качество fallback-детекции ниже, чем у fine-tuned YOLO.
+```text
+runs/detect/runs/detect/pricetag_tiled_v1/weights/best.pt
+runs/detect/runs/detect/pricetag_v1/weights/best.pt
+```
+
+Можно явно указать путь:
+
+```bash
+export SHELF_YOLO_WEIGHTS=/path/to/pricetag_tiled.pt
+```
+
+По умолчанию проект **не скачивает** модели из сети и **не возвращается** к generic COCO `yolov8n.pt`, потому что COCO не содержит класса ценника. Для локального эксперимента с автоскачиванием обученных весов нужно явно включить:
+
+```bash
+export SHELF_ALLOW_MODEL_DOWNLOAD=true
+```
+
+Если веса отсутствуют, режим `hybrid` автоматически использует MSER fallback. Это позволяет проекту запускаться локально и в Docker даже без обученной модели, но качество fallback-детекции ниже, чем у fine-tuned YOLO.
+
+### Локальный catalog lookup
+
+Если доступны локальные CSV с barcode/SKU/product_name, можно построить каталог без внешних API:
+
+```bash
+PYTHONPATH=src python scripts/build_catalog.py data/*.csv --out data/catalog.csv
+```
+
+При валидном `barcode` или `id_sku` catalog lookup может заполнить `product_name` и пустые price-поля; OCR остаётся fallback. Переопределение пути:
+
+```bash
+export SHELF_CATALOG_PATH=/path/to/catalog.csv
+```
+
+### Быстрые smoke/HF flags
+
+Production defaults не меняются, но для быстрых проверок на CPU есть feature flags:
+
+```bash
+export SHELF_MSER_PROCESS_WIDTH=480      # ускорить MSER fallback в smoke-run
+export SHELF_MAX_TRACKS=2                # обработать только top-scored tracks
+export SHELF_CODE_DECODE_MODE=off        # off|fast|full для QR/barcode smoke
+export SHELF_CODE_MAX_VARIANTS=24        # лимит QR/barcode вариантов
+```
 
 ---
 

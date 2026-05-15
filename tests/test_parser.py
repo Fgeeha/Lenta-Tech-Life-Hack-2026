@@ -121,3 +121,24 @@ def test_parse_prices_uses_card_and_default_context():
     tag = parse_ocr_result(lines, bbox=(0, 0, 200, 200))
     assert tag.price_card == "129,99"
     assert tag.price_default == "252,63"
+
+
+def test_parse_recovers_split_rubles_and_kopecks_from_boxes():
+    """OCR sometimes splits a price into two boxes: '129' + '99'."""
+    import numpy as np
+
+    crop = np.zeros((120, 220, 3), dtype=np.uint8)
+    lines = [
+        ([[30, 82], [120, 82], [120, 110], [30, 110]], "129", 0.96),
+        ([[126, 88], [158, 88], [158, 105], [126, 105]], "99", 0.94),
+    ]
+    tag = parse_ocr_result(lines, crop=crop, bbox=(0, 0, 220, 120))
+    assert tag.price_card == "129,99"
+    assert tag.price_default == ""
+
+
+def test_product_name_cleanup_removes_service_numbers_but_keeps_percent():
+    from shelf.ocr.parser import _clean_product_name
+
+    raw = "Молоко питьевое 3.2% 4607124143901 129,99 руб 03.04.2026 3:08"
+    assert _clean_product_name(raw) == "Молоко питьевое 3.2%"

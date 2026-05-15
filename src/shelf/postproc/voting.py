@@ -147,12 +147,7 @@ def vote_tags(
             confidences.get("qr_code_barcode", 0.0),
         )
 
-    if _present(data.get("price_default")) and not _present(
-        data.get("price1_qr")
-    ):
-        data["price1_qr"] = _format_qr_price(data["price_default"])
-    if _present(data.get("price_card")) and not _present(data.get("price4_qr")):
-        data["price4_qr"] = _format_qr_price(data["price_card"])
+    _apply_price_consistency(data, sources, confidences)
 
     return VotingResult(PriceTag(**data), sources, confidences)
 
@@ -347,6 +342,78 @@ def _format_qr_price(raw: Any) -> str:
         if value is not None
         else str(raw).strip()
     )
+
+
+def _format_ocr_price(raw: Any) -> str:
+    value = _normalize_price(raw)
+    return (
+        _format_price(value, decimal_comma=True)
+        if value is not None
+        else str(raw).strip()
+    )
+
+
+def _apply_price_consistency(
+    data: dict[str, Any], sources: dict[str, str], confidences: dict[str, float]
+) -> None:
+    """Keep OCR and QR price fields mutually consistent after voting."""
+    if not _present(data.get("price_default")) and _present(
+        data.get("price1_qr")
+    ):
+        data["price_default"] = _format_ocr_price(data["price1_qr"])
+        sources["price_default"] = "qr"
+        confidences["price_default"] = max(
+            confidences.get("price1_qr", 0.0), 0.75
+        )
+
+    if not _present(data.get("price_card")):
+        for qr_field in ("price4_qr", "action_price_qr", "price2_qr"):
+            if _present(data.get(qr_field)):
+                data["price_card"] = _format_ocr_price(data[qr_field])
+                sources["price_card"] = "qr"
+                confidences["price_card"] = max(
+                    confidences.get(qr_field, 0.0), 0.75
+                )
+                break
+
+    card = _normalize_price(data.get("price_card"))
+    default = _normalize_price(data.get("price_default"))
+    if card is not None and default is not None and card > default + 0.009:
+        # In Lenta GT, price_card/action is not higher than default price. Swap
+        # conservative OCR inversions produced by line-order mistakes.
+        data["price_card"], data["price_default"] = (
+            _format_price(default, decimal_comma=True),
+            _format_price(card, decimal_comma=True),
+        )
+        sources["price_card"] = sources.get("price_card", "ocr_vote") + "+swap"
+        sources["price_default"] = (
+            sources.get("price_default", "ocr_vote") + "+swap"
+        )
+
+    if _present(data.get("price_default")) and not _present(
+        data.get("price1_qr")
+    ):
+        data["price1_qr"] = _format_qr_price(data["price_default"])
+        sources["price1_qr"] = "derived"
+        confidences["price1_qr"] = min(
+            0.70, confidences.get("price_default", 0.70)
+        )
+    if _present(data.get("price_card")) and not _present(data.get("price4_qr")):
+        data["price4_qr"] = _format_qr_price(data["price_card"])
+        sources["price4_qr"] = "derived"
+        confidences["price4_qr"] = min(
+            0.70, confidences.get("price_card", 0.70)
+        )
+
+    if not _present(data.get("discount_amount")):
+        card = _normalize_price(data.get("price_card"))
+        default = _normalize_price(data.get("price_default"))
+        if card is not None and default is not None and default > card > 0:
+            pct = int((1 - card / default) * 100)
+            if 1 <= pct <= 99:
+                data["discount_amount"] = f"-{pct}%"
+                sources["discount_amount"] = "derived"
+                confidences["discount_amount"] = 0.65
 
 
 def _choose_price(

@@ -59,3 +59,40 @@ def test_sample_frames_timestamps_are_milliseconds(tmp_path):
     frames = list(sample_frames(video, interval_ms=500, adaptive=False))
     timestamps = [ts for ts, _ in frames]
     assert timestamps[:4] == pytest.approx([0.0, 500.0, 1000.0, 1500.0])
+
+
+def test_sample_frames_respects_max_timestamp_ms(tmp_path):
+    from shelf.io.video import sample_frames
+
+    video = _make_fake_video(tmp_path, n_frames=80, fps=20.0)
+    frames = list(
+        sample_frames(
+            video,
+            interval_ms=500,
+            adaptive=False,
+            max_timestamp_ms=750.0,
+        )
+    )
+    assert [ts for ts, _ in frames] == pytest.approx([0.0, 500.0])
+
+
+def test_mser_process_width_env_override(monkeypatch):
+    from shelf.detect.detector import MSERDetector
+
+    monkeypatch.setenv("SHELF_MSER_PROCESS_WIDTH", "480")
+    assert MSERDetector().process_width == 480
+
+
+def test_pipeline_max_tracks_env_keeps_best_scores(monkeypatch):
+    from shelf.detect.detector import Detection
+    from shelf.detect.tracker import TrackState
+    from shelf.pipeline import _limit_tracks_for_ocr
+
+    tracks = {
+        1: TrackState(1, Detection(0, 0, 10, 10, 0.5), best_score=1.0),
+        2: TrackState(2, Detection(0, 0, 10, 10, 0.5), best_score=5.0),
+        3: TrackState(3, Detection(0, 0, 10, 10, 0.5), best_score=3.0),
+    }
+    monkeypatch.setenv("SHELF_MAX_TRACKS", "2")
+    limited = _limit_tracks_for_ocr(tracks)
+    assert list(limited) == [2, 3]

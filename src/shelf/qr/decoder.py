@@ -59,6 +59,23 @@ _PRICE_FIELDS = {
 _DIGITS_RE = re.compile(r"\d+")
 
 
+def _decode_mode() -> str:
+    """Return QR/barcode decoding mode: full, fast or off."""
+    mode = os.getenv("SHELF_CODE_DECODE_MODE", "full").strip().lower()
+    return mode if mode in {"full", "fast", "off"} else "full"
+
+
+def _variant_limit(default_full: int, default_fast: int) -> int:
+    """Limit expensive image variants for smoke/HF-friendly runs."""
+    raw = os.getenv("SHELF_CODE_MAX_VARIANTS", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            logger.warning("Invalid SHELF_CODE_MAX_VARIANTS=%r; ignoring", raw)
+    return default_fast if _decode_mode() == "fast" else default_full
+
+
 def _barcode_repair_enabled() -> bool:
     return os.getenv(
         "SHELF_ENABLE_BARCODE_REPAIR", "false"
@@ -345,7 +362,7 @@ def _raw_to_fields(raw: str) -> dict[str, str]:
 
 def decode_qr(crop: np.ndarray) -> dict[str, str]:
     """Read QR/barcode from a price-tag crop."""
-    if crop is None or crop.size == 0:
+    if crop is None or crop.size == 0 or _decode_mode() == "off":
         return {}
 
     # Fast pass on the original crop before generating many variants.
@@ -354,15 +371,20 @@ def decode_qr(crop: np.ndarray) -> dict[str, str]:
         if parsed:
             return parsed
 
+    roi_limit = _variant_limit(default_full=10_000, default_fast=24)
     # Geometric ROI pass: cheaper than processing dozens of full-crop variants
     # and often enough for tiny QR/barcodes in the right/bottom price-tag zones.
-    for img in _roi_variants(crop):
+    for img in _roi_variants(crop)[:roi_limit]:
         for raw in _try_pyzbar(img) + _try_opencv(img):
             parsed = _raw_to_fields(raw)
             if parsed:
                 return parsed
 
-    for img in _image_variants(crop):
+    if _decode_mode() == "fast":
+        return {}
+
+    full_limit = _variant_limit(default_full=10_000, default_fast=12)
+    for img in _image_variants(crop)[:full_limit]:
         for raw in _try_pyzbar(img) + _try_opencv(img):
             parsed = _raw_to_fields(raw)
             if parsed:
@@ -380,16 +402,20 @@ def decode_qr(crop: np.ndarray) -> dict[str, str]:
 
 def decode_barcode(crop: np.ndarray) -> str:
     """Read linear barcode from a crop. Returns a normalized string or ''."""
-    if crop is None or crop.size == 0:
+    if crop is None or crop.size == 0 or _decode_mode() == "off":
         return ""
-    for img in _barcode_roi_variants(crop):
+    roi_limit = _variant_limit(default_full=10_000, default_fast=24)
+    for img in _barcode_roi_variants(crop)[:roi_limit]:
         for raw in _try_pyzbar(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)
                 if normalized:
                     return normalized
-    for img in _image_variants(crop):
+    if _decode_mode() == "fast":
+        return ""
+    full_limit = _variant_limit(default_full=10_000, default_fast=12)
+    for img in _image_variants(crop)[:full_limit]:
         for raw in _try_pyzbar(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:

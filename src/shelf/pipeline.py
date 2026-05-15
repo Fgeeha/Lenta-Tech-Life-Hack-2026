@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +28,31 @@ from shelf.schema import OUTPUT_COLUMNS, PriceTag
 logger = logging.getLogger(__name__)
 
 _CROP_MARGIN = 24
+
+
+def _limit_tracks_for_ocr(best_tracks: dict[int, object]) -> dict[int, object]:
+    """Optionally keep only top-scored tracks for fast smoke/debug runs.
+
+    Production default is unlimited.  Set ``SHELF_MAX_TRACKS`` only for local
+    smoke tests or demos when OCR/QR on all detected crops would be too slow.
+    """
+    max_tracks_raw = os.getenv("SHELF_MAX_TRACKS", "").strip()
+    if not max_tracks_raw:
+        return best_tracks
+    try:
+        max_tracks = int(max_tracks_raw)
+    except ValueError:
+        logger.warning("Invalid SHELF_MAX_TRACKS=%r; ignoring", max_tracks_raw)
+        return best_tracks
+    if max_tracks <= 0 or len(best_tracks) <= max_tracks:
+        return best_tracks
+    return dict(
+        sorted(
+            best_tracks.items(),
+            key=lambda item: getattr(item[1], "best_score", 0.0),
+            reverse=True,
+        )[:max_tracks]
+    )
 
 
 def _extract_tag(
@@ -154,6 +180,7 @@ def run(
         video_path,
         interval_ms=interval_ms,
         adaptive=adaptive,
+        max_timestamp_ms=max_ts_ms,
         progress_callback=lambda v, t: _progress(v, t),
     ):
         if max_ts_ms is not None and ts_ms > max_ts_ms:
@@ -175,6 +202,12 @@ def run(
             )
 
     best_tracks = tracker.get_best_crops(min_hits=min_hits)
+    before_limit = len(best_tracks)
+    best_tracks = _limit_tracks_for_ocr(best_tracks)
+    if len(best_tracks) != before_limit:
+        logger.info(
+            "Ограничили OCR треки: %d -> %d", before_limit, len(best_tracks)
+        )
     logger.info(
         "Стабильных треков (%d+ кадров): %d", min_hits, len(best_tracks)
     )

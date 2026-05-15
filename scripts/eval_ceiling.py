@@ -1,16 +1,19 @@
-"""GT-guided ceiling evaluation.
+"""GT-guided ceiling evaluation for OCR/QR post-processing.
 
-DIAGNOSTIC ONLY — GT bboxes used only for ceiling estimation.
-NOT used in production inference per §1 of CLAUDE.md.
-
-Измеряет максимально возможную метрику при идеальном детекторе:
-для каждого GT-ценника берём точный bbox, запускаем production OCR+parser,
-считаем долю верных полей.
+DIAGNOSTIC ONLY — GT bboxes are used only for ceiling estimation, never during
+production inference.  The script is robust to missing private videos: it prints
+all missing paths and exits without appending misleading zero rows to METRICS.md.
 """
 
+from __future__ import annotations
+
+import argparse
+import json
 import logging
 import re
+from datetime import date
 from pathlib import Path
+from typing import Any
 
 import cv2
 import pandas as pd
@@ -22,34 +25,13 @@ from shelf.ocr.template import classify_color
 from shelf.postproc.merge import merge
 from shelf.postproc.voting import merge_candidate_tags
 from shelf.qr.decoder import decode_barcode, decode_qr
+from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("Данные")
-LABELED = [
-    (
-        "25_12-20",
-        DATA_ROOT / "25_12-20" / "25_12-20.mp4",
-        DATA_ROOT / "25_12-20" / "25_12-20.csv",
-    ),
-    (
-        "25_2-10",
-        DATA_ROOT / "25_2-10" / "25_2-10.mp4",
-        DATA_ROOT / "25_2-10" / "25_2-10.csv",
-    ),
-    (
-        "26_12-20",
-        DATA_ROOT / "26_12-20" / "26_12-20.mp4",
-        DATA_ROOT / "26_12-20" / "26_12-20.csv",
-    ),
-    (
-        "43_15",
-        DATA_ROOT / "43_15" / "43_15.mp4",
-        DATA_ROOT / "43_15" / "43_15.csv",
-    ),
-    ("49_5", DATA_ROOT / "49_5" / "49_5.mp4", DATA_ROOT / "49_5" / "49_5.csv"),
-]
+LABELED_NAMES = ["25_12-20", "25_2-10", "26_12-20", "43_15", "49_5"]
 
 EVAL_FIELDS = [
     "product_name",
@@ -66,18 +48,28 @@ EVAL_FIELDS = [
 ]
 
 
+def labeled_paths(data_root: Path) -> list[tuple[str, Path, Path]]:
+    """Return expected labeled video/CSV paths under ``data_root``."""
+    return [
+        (
+            name,
+            data_root / name / f"{name}.mp4",
+            data_root / name / f"{name}.csv",
+        )
+        for name in LABELED_NAMES
+    ]
+
+
 def _normalize_gt(df: pd.DataFrame) -> pd.DataFrame:
     if "wholesale_level_1_coun" in df.columns:
         df = df.rename(
             columns={"wholesale_level_1_coun": "wholesale_level_1_count"}
         )
-    # Strip trailing spaces from filename (43_15 GT has "43_15.mp4 ")
     if "filename" in df.columns:
-        df["filename"] = df["filename"].str.strip()
+        df["filename"] = df["filename"].astype(str).str.strip()
     for col in ["barcode", "qr_code_barcode"]:
         if col in df.columns:
             df[col] = df[col].apply(_norm_bc)
-    # Strip embedded spaces from id_sku (49_5 GT has "360108 699851")
     if "id_sku" in df.columns:
         df["id_sku"] = df["id_sku"].apply(
             lambda v: re.sub(r"\s+", "", str(v).strip()) if pd.notna(v) else ""
@@ -85,11 +77,10 @@ def _normalize_gt(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _norm_bc(val) -> str:
+def _norm_bc(val: Any) -> str:
     if pd.isna(val):
         return ""
     s = str(val).strip()
-    # 49_5 GT stores barcodes with spaces: "4 607124 143901"
     s = re.sub(r"\s+", "", s)
     try:
         if "." in s:
@@ -103,39 +94,44 @@ def _norm_bc(val) -> str:
 
 def _token_overlap(a: str, b: str) -> float:
     """Jaccard similarity on word tokens (case-insensitive)."""
-    ta = set(re.findall(r"\w+", a.lower()))
-    tb = set(re.findall(r"\w+", b.lower()))
+    ta = set(re.findall(r"\w+", str(a).lower()))
+    tb = set(re.findall(r"\w+", str(b).lower()))
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / len(ta | tb)
 
 
-def _field_match(pred_val, gt_val, field: str = "") -> bool:
+def _field_match(pred_val: Any, gt_val: Any, field: str = "") -> bool:
     p = str(pred_val).strip().lower()
     g = str(gt_val).strip().lower()
-    if g in ("нет", "nan", ""):
+    if g in (ABSENT_VALUE, "nan", ""):
         return True
-    if p in ("", "нет"):
+    if p in ("", ABSENT_VALUE, "nan"):
         return False
-    p = re.sub(r"[,.]", ".", p)
-    g = re.sub(r"[,.]", ".", g)
+    if field in {"barcode", "qr_code_barcode", "id_sku"}:
+        return re.sub(r"\D", "", p) == re.sub(r"\D", "", g)
+    p_num = re.sub(r"[,.]", ".", p.replace(" ", ""))
+    g_num = re.sub(r"[,.]", ".", g.replace(" ", ""))
     try:
-        # BUG FIX: tolerance 1.5 руб — OCR читает "129" без копеек, GT "129,99"
-        return abs(float(p) - float(g)) < 1.5
+        return abs(float(p_num) - float(g_num)) < 1.5
     except ValueError:
         pass
     if p == g:
         return True
-    # Fuzzy match for long text fields (product_name, additional_info)
     if field in ("product_name", "additional_info") and len(g) > 10:
         return _token_overlap(p, g) >= 0.40
     return False
 
 
+def _present(val: Any) -> bool:
+    s = str(val or "").strip()
+    return bool(s and s.lower() not in {"nan", "none"} and s != ABSENT_VALUE)
+
+
 def _extract_one(
     frame: cv2.Mat, row: pd.Series, ocr: OCREngine, ocr_ru: OCREngine | None
-) -> dict:
-    """OCR + parse на одном GT-bbox. Возвращает dict поле→значение."""
+) -> dict[str, Any]:
+    """Run production OCR+QR parser on one GT bbox and return field values."""
     x1, y1, x2, y2 = (
         int(row.x_min),
         int(row.y_min),
@@ -143,7 +139,6 @@ def _extract_one(
         int(row.y_max),
     )
     h, w = frame.shape[:2]
-    # Margin +10% для захвата полного ценника
     mx = max(5, int((x2 - x1) * 0.10))
     my = max(5, int((y2 - y1) * 0.10))
     x1, y1 = max(0, x1 - mx), max(0, y1 - my)
@@ -195,13 +190,15 @@ def eval_video(
     csv_path: Path,
     ocr: OCREngine,
     ocr_ru: OCREngine | None,
-) -> dict:
+) -> dict[str, Any]:
+    """Evaluate one video using GT bboxes."""
     gt_df = _normalize_gt(pd.read_csv(csv_path, decimal=","))
     cap = cv2.VideoCapture(str(video_path))
-
     scores: list[float] = []
     field_hits: dict[str, int] = {f: 0 for f in EVAL_FIELDS}
-    n_total = len(gt_df)
+    fill_hits: dict[str, int] = {f: 0 for f in OUTPUT_COLUMNS}
+    barcode_count = 0
+    qr_barcode_count = 0
 
     for _, gt_row in gt_df.iterrows():
         ts_ms = float(gt_row.get("frame_timestamp", 0))
@@ -210,84 +207,176 @@ def eval_video(
         if not ret:
             scores.append(0.0)
             continue
-
         pred = _extract_one(frame, gt_row, ocr, ocr_ru)
-
+        barcode_count += int(_present(pred.get("barcode")))
+        qr_barcode_count += int(_present(pred.get("qr_code_barcode")))
+        for col in OUTPUT_COLUMNS:
+            fill_hits[col] += int(_present(pred.get(col)))
         correct = 0
         for field in EVAL_FIELDS:
-            gt_val = gt_row.get(field, "")
-            pred_val = pred.get(field, "")
-            ok = _field_match(pred_val, gt_val, field=field)
-            if ok:
+            if _field_match(
+                pred.get(field, ""), gt_row.get(field, ""), field=field
+            ):
                 correct += 1
                 field_hits[field] += 1
         scores.append(correct / len(EVAL_FIELDS))
 
     cap.release()
+    n_total = len(gt_df)
     n_pass = sum(1 for s in scores if s >= 0.80)
-    avg = sum(scores) / max(1, len(scores))
     return {
         "video": name,
         "n_gt": n_total,
         "n_pass": n_pass,
         "metric": n_pass / max(1, n_total),
-        "avg_field": avg,
+        "avg_field": sum(scores) / max(1, len(scores)),
+        "barcode_count": barcode_count,
+        "qr_barcode_count": qr_barcode_count,
         "field_accuracy": {
             f: field_hits[f] / max(1, n_total) for f in EVAL_FIELDS
+        },
+        "fill_rates": {
+            f: fill_hits[f] / max(1, n_total) for f in OUTPUT_COLUMNS
         },
     }
 
 
-def main() -> None:
-    ocr = OCREngine()  # EN/PaddleOCR: цифры, цены
-    ocr_ru = OCREngine(lang="ru", force_easyocr=True)  # EasyOCR RU+EN: названия
-    results = []
-    all_field_acc: dict[str, list[float]] = {f: [] for f in EVAL_FIELDS}
-
-    for name, video_path, csv_path in LABELED:
-        if not video_path.exists():
-            logger.warning("Пропуск %s — файл не найден", name)
-            continue
-        logger.warning("Обрабатываем %s...", name)
-        r = eval_video(name, video_path, csv_path, ocr, ocr_ru)
-        results.append(r)
-        for f in EVAL_FIELDS:
-            all_field_acc[f].append(r["field_accuracy"][f])
-
-    print("\n=== Ceiling (GT bboxes, production OCR) ===")
-    for r in results:
-        print(
-            f"  {r['video']:15s}: metric@80%={r['metric']:.3f}  "
-            f"avg_field={r['avg_field']:.3f}  pass={r['n_pass']}/{r['n_gt']}"
-        )
-
+def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate ceiling metrics."""
     total_gt = sum(r["n_gt"] for r in results)
     total_pass = sum(r["n_pass"] for r in results)
-    overall = total_pass / max(1, total_gt)
-    print(f"\n  OVERALL metric@80%: {overall:.3f}  ({total_pass}/{total_gt})")
+    return {
+        "videos": results,
+        "overall": {
+            "n_gt": total_gt,
+            "metric_80": total_pass / max(1, total_gt),
+            "avg_field": sum(r["avg_field"] * r["n_gt"] for r in results)
+            / max(1, total_gt),
+            "barcode_count": sum(r["barcode_count"] for r in results),
+            "qr_barcode_count": sum(r["qr_barcode_count"] for r in results),
+            "field_accuracy": {
+                f: sum(r["field_accuracy"][f] * r["n_gt"] for r in results)
+                / max(1, total_gt)
+                for f in EVAL_FIELDS
+            },
+        },
+    }
 
-    print("\n=== Точность по полям (avg по всем видео) ===")
-    print(f"  {'field':<28} {'accuracy':>8}")
-    print(f"  {'-'*28} {'-'*8}")
-    for field in EVAL_FIELDS:
-        acc = sum(all_field_acc[field]) / max(1, len(all_field_acc[field]))
+
+def print_summary(summary: dict[str, Any]) -> None:
+    """Print a human-readable ceiling report."""
+    print("\n=== Ceiling (GT bboxes, production OCR) ===")
+    for r in summary["videos"]:
+        print(
+            f"  {r['video']:15s}: metric@80%={r['metric']:.3f}  "
+            f"avg_field={r['avg_field']:.3f}  pass={r['n_pass']}/{r['n_gt']} "
+            f"bc={r['barcode_count']} qr_bc={r['qr_barcode_count']}"
+        )
+    o = summary["overall"]
+    print(
+        f"\n  OVERALL metric@80%: {o['metric_80']:.3f}  avg_field={o['avg_field']:.3f} "
+        f"bc={o['barcode_count']} qr_bc={o['qr_barcode_count']}"
+    )
+    print("\n=== Точность по полям (weighted avg) ===")
+    for field, acc in sorted(o["field_accuracy"].items(), key=lambda kv: kv[1]):
         bar = "█" * int(acc * 20)
         print(f"  {field:<28} {acc:>7.3f}  {bar}")
 
-    # METRICS.md
-    import subprocess
-    from datetime import date
 
-    commit = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True
-    ).stdout.strip()
+def append_metrics_md(summary: dict[str, Any]) -> None:
+    """Append a metrics row only when at least one video was evaluated."""
+    import subprocess
+
+    commit = (
+        subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        or "no-git"
+    )
     today = date.today().isoformat()
-    per_video = "  ".join(f"{r['video']}={r['metric']:.3f}" for r in results)
-    with open("docs/METRICS.md", "a") as f:
+    o = summary["overall"]
+    per_video = "  ".join(
+        f"{r['video']}={r['metric']:.3f}" for r in summary["videos"]
+    )
+    with open("docs/METRICS.md", "a", encoding="utf-8") as f:
         f.write(
-            f"| {today} | {commit} | ceiling (GT bboxes) | {overall:.3f} | {per_video} |\n"
+            f"| {today} | {commit} | ceiling (GT bboxes) | {o['metric_80']:.3f} | "
+            f"avg_field={o['avg_field']:.3f}; bc={o['barcode_count']}; qr_bc={o['qr_barcode_count']}; {per_video} |\n"
         )
-    print("\n  Метрика записана в docs/METRICS.md")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Evaluate OCR/QR ceiling with GT bboxes"
+    )
+    parser.add_argument("--data-root", type=Path, default=DATA_ROOT)
+    parser.add_argument(
+        "--ocr-engine",
+        default="auto",
+        choices=["auto", "paddle_v4", "paddle_v5", "easyocr", "none"],
+    )
+    parser.add_argument("--json-out", type=Path, default=None)
+    parser.add_argument("--append-metrics", action="store_true")
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+    ocr = OCREngine(engine=args.ocr_engine)
+    ocr_ru = OCREngine(lang="ru", force_easyocr=True)
+    results: list[dict[str, Any]] = []
+    missing: list[str] = []
+
+    for name, video_path, csv_path in labeled_paths(args.data_root):
+        if not video_path.exists() or not csv_path.exists():
+            missing.append(f"{name}: video={video_path} csv={csv_path}")
+            logger.warning(
+                "Пропуск %s — video_exists=%s csv_exists=%s",
+                name,
+                video_path.exists(),
+                csv_path.exists(),
+            )
+            continue
+        logger.warning("Обрабатываем %s...", name)
+        results.append(eval_video(name, video_path, csv_path, ocr, ocr_ru))
+
+    if not results:
+        print("No ceiling videos were evaluated. Missing expected files:")
+        for line in missing:
+            print(f"  - {line}")
+        if args.json_out:
+            args.json_out.write_text(
+                json.dumps(
+                    {
+                        "rows": 0,
+                        "videos": [],
+                        "missing": missing,
+                        "overall": {
+                            "n_gt": 0,
+                            "metric_80": None,
+                            "avg_field": None,
+                            "barcode_count": 0,
+                            "qr_barcode_count": 0,
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        return
+
+    summary = summarize(results)
+    print_summary(summary)
+    if args.json_out:
+        args.json_out.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    if args.append_metrics:
+        append_metrics_md(summary)
+        print("\n  Метрика записана в docs/METRICS.md")
 
 
 if __name__ == "__main__":

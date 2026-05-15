@@ -55,13 +55,15 @@ def sample_frames(
     max_dim: int = 1280,
     min_sharpness: float = 0.0,
     max_frames: int | None = None,
+    max_timestamp_ms: float | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> Generator[tuple[float, np.ndarray], None, None]:
     """Yield ``(timestamp_ms, frame)`` with a fixed/adaptive stride.
 
     ``timestamp_ms`` is milliseconds from the beginning of the video, which is the
     unit required by the output CSV. Older versions yielded seconds; the pipeline
-    now keeps milliseconds end-to-end.
+    now keeps milliseconds end-to-end.  ``max_timestamp_ms`` lets callers enforce
+    UI smoke-test/duration limits without decoding the rest of a long video.
     """
     video_path = Path(video_path)
     cap = cv2.VideoCapture(str(video_path))
@@ -91,12 +93,15 @@ def sample_frames(
 
     try:
         while True:
+            ts_ms = frame_idx / fps * 1000.0
+            if max_timestamp_ms is not None and ts_ms > max_timestamp_ms:
+                break
+
             ret, frame = cap.read()
             if not ret:
                 break
 
             if frame_idx % step == 0:
-                ts_ms = frame_idx / fps * 1000.0
 
                 if adaptive:
                     small = (

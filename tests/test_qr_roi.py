@@ -29,3 +29,14 @@ def test_barcode_roi_variants_focus_on_bottom_regions():
         v.shape[0] != crop.shape[0] or v.shape[1] != crop.shape[1]
         for v in variants
     )
+
+
+def test_code_decode_off_mode(monkeypatch):
+    import numpy as np
+
+    from shelf.qr.decoder import decode_barcode, decode_qr
+
+    monkeypatch.setenv("SHELF_CODE_DECODE_MODE", "off")
+    crop = np.zeros((32, 64, 3), dtype=np.uint8)
+    assert decode_qr(crop) == {}
+    assert decode_barcode(crop) == ""

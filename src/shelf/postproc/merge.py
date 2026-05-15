@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from shelf.schema import ABSENT_VALUE, PriceTag
 from shelf.validation import normalize_ean13
 
@@ -61,21 +63,34 @@ def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
                 price_card = data["price_card"]
                 break
 
+    _apply_price_consistency(data)
+
+    return PriceTag(**data)
+
+
+def _apply_price_consistency(data: dict[str, Any]) -> None:
+    """Derive and correct price fields after OCR+QR merge."""
+    price_card = data.get("price_card", "")
+    price_default = data.get("price_default", "")
+
     if data.get("price4_qr", "") in _EMPTY and price_card not in _EMPTY:
         data["price4_qr"] = _fmt_price_for_qr(price_card)
     if data.get("price1_qr", "") in _EMPTY and price_default not in _EMPTY:
         data["price1_qr"] = _fmt_price_for_qr(price_default)
 
-    # Derive discount if both prices are present.
-    if data.get("discount_amount", "") in _EMPTY:
-        pc = _safe_float(data.get("price_card", ""))
-        pd = _safe_float(data.get("price_default", ""))
-        if pc and pd and pd > pc > 0:
-            pct = int((1 - pc / pd) * 100)
-            if 1 <= pct <= 99:
-                data["discount_amount"] = f"-{pct}%"
+    pc = _safe_float(data.get("price_card", ""))
+    pd = _safe_float(data.get("price_default", ""))
+    if pc is not None and pd is not None and pc > pd + 0.009:
+        data["price_card"] = _fmt_price_for_ocr(str(pd))
+        data["price_default"] = _fmt_price_for_ocr(str(pc))
+        pc, pd = pd, pc
+        data["price4_qr"] = _fmt_price_for_qr(data["price_card"])
+        data["price1_qr"] = _fmt_price_for_qr(data["price_default"])
 
-    return PriceTag(**data)
+    if data.get("discount_amount", "") in _EMPTY and pc and pd and pd > pc > 0:
+        pct = int((1 - pc / pd) * 100)
+        if 1 <= pct <= 99:
+            data["discount_amount"] = f"-{pct}%"
 
 
 def _safe_float(val: str) -> float | None:

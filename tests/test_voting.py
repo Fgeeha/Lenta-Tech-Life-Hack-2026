@@ -48,3 +48,20 @@ def test_voting_empty_values_do_not_overwrite_good_values():
     tag = merge_candidate_tags(tags, candidate_scores=[1.0, 100.0])
     assert tag.price_card == "129,99"
     assert tag.product_name == "Мёд липовый"
+
+
+def test_voting_uses_qr_prices_to_fill_ocr_prices_and_discount():
+    tag = merge_candidate_tags(
+        [PriceTag(price1_qr="189.99", price4_qr="129.99")]
+    )
+    assert tag.price_default == "189,99"
+    assert tag.price_card == "129,99"
+    assert tag.discount_amount.startswith("-")
+
+
+def test_voting_swaps_inverted_card_and_default_prices():
+    tag = merge_candidate_tags(
+        [PriceTag(price_card="189,99", price_default="129,99")]
+    )
+    assert tag.price_card == "129,99"
+    assert tag.price_default == "189,99"

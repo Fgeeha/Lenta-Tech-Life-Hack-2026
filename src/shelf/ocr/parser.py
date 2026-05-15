@@ -51,6 +51,16 @@ _NON_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+_NAME_DATE_RE = re.compile(
+    r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}(?:\s+\d{1,2}[:.]\d{2})?"
+)
+_NAME_LONG_DIGITS_RE = re.compile(r"\d{8,}")
+_NAME_PRICE_RE = re.compile(
+    r"(?<!\w)\d{1,5}(?:[,.\-]\d{1,2})?\s*(?:руб\.?|₽)(?!\w)",
+    re.IGNORECASE,
+)
+_STANDALONE_NUMERIC_RE = re.compile(r"^[\d\s,.\-%₽руб]+$", re.IGNORECASE)
+
 _NUMERIC_OCR_TRANSLATION = str.maketrans(
     {
         "O": "0",
@@ -308,7 +318,68 @@ def _extract_price_candidates(boxes: list[OCRBox]) -> list[PriceCandidate]:
                     value=val, text=b.text, score=score, box=b, context=context
                 )
             )
+    candidates.extend(_split_kopeck_candidates(boxes, contexts))
     return candidates
+
+
+def _digits_token(text: str) -> str:
+    """Return digits for a compact OCR numeric token, or empty for text/IDs."""
+    raw = _numeric_text(text).strip()
+    if not raw or _looks_like_date_or_code(raw) or "%" in raw:
+        return ""
+    if re.search(r"[a-zа-яё]", raw.lower()):
+        # Currency-bearing tokens are handled by regular price extraction.
+        return ""
+    digits = re.sub(r"\D", "", raw)
+    return digits if digits and len(digits) <= 5 else ""
+
+
+def _split_kopeck_candidates(
+    boxes: list[OCRBox], contexts: dict[int, str]
+) -> list[PriceCandidate]:
+    """Recover prices split by OCR into ruble and kopeck boxes (``129`` + ``99``)."""
+    out: list[PriceCandidate] = []
+    for li, left in enumerate(boxes):
+        rub = _digits_token(left.text)
+        if not (2 <= len(rub) <= 5):
+            continue
+        rub_val = int(rub)
+        if rub_val < 10:
+            continue
+        for ri, right in enumerate(boxes):
+            if li == ri:
+                continue
+            cents = _digits_token(right.text)
+            if not (1 <= len(cents) <= 2) or int(cents) > 99:
+                continue
+            if right.center_x <= left.center_x:
+                continue
+            if abs(right.center_y - left.center_y) > 0.075:
+                continue
+            gap = right.x0 - left.x1
+            if gap < -0.03 or gap > 0.16:
+                continue
+            if right.area > left.area * 0.95:
+                continue
+            value = rub_val + int(cents.ljust(2, "0")[:2]) / 100.0
+            if not (1.0 <= value <= 99_999.99):
+                continue
+            context = (
+                f"{contexts.get(li, left.text)} {contexts.get(ri, right.text)}"
+            )
+            text = f"{rub},{cents}"
+            score = (left.area + right.area) * max(left.conf, right.conf, 0.05)
+            score *= 1.35 * _price_context_multiplier(text, context, value)
+            out.append(
+                PriceCandidate(
+                    value=value,
+                    text=text,
+                    score=score,
+                    box=left,
+                    context=context,
+                )
+            )
+    return out
 
 
 def _has_card_signal(c: PriceCandidate) -> bool:
@@ -372,14 +443,22 @@ def _choose_prices(
             return _fmt_price(card_val), _fmt_price(default_val)
 
         if len(values) >= 2:
-            # If one candidate is much larger on the image, it is usually the card/action price.
-            if (
+            # If one candidate is much larger on the image, it is usually the
+            # card/action price.  Do not duplicate it into price_default when
+            # smaller values are just split ruble/kopeck components.
+            top_candidate_is_price = (
                 len(ordered_by_score) > 1
                 and ordered_by_score[0].score > ordered_by_score[1].score * 1.35
-            ):
+            )
+            if top_candidate_is_price:
                 card_val = ordered_by_score[0].value
-            else:
-                card_val = min(values)
+                default_candidates = [v for v in values if v > card_val + 0.009]
+                return _fmt_price(card_val), (
+                    _fmt_price(max(default_candidates))
+                    if default_candidates
+                    else ""
+                )
+            card_val = min(values)
             default_candidates = [v for v in values if v > card_val + 0.009]
             default_val = (
                 max(default_candidates) if default_candidates else max(values)
@@ -408,15 +487,41 @@ def _preprocess_name_zone(crop_raw: np.ndarray, scale: int = 3) -> np.ndarray:
     return img
 
 
+def _sanitize_name_fragment(text: str) -> str:
+    """Remove service numbers/prices from a possible product-name fragment."""
+    part = str(text or "").replace("\u00a0", " ")
+    part = _NAME_DATE_RE.sub(" ", part)
+    part = _NAME_LONG_DIGITS_RE.sub(" ", part)
+    part = _NAME_PRICE_RE.sub(" ", part)
+    part = re.sub(
+        r"\b(?:qr|ean|barcode|штрих\s*код|артикул|id[_\s-]*sku)\b",
+        " ",
+        part,
+        flags=re.IGNORECASE,
+    )
+    part = re.sub(r"\s+", " ", part).strip(" -|•\t\n")
+    if len(part) < 2:
+        return ""
+    letters = len(re.findall(r"[a-zа-яё]", part.lower()))
+    digits = len(re.findall(r"\d", part))
+    if letters < 2:
+        return ""
+    if digits > max(6, letters * 2):
+        return ""
+    if _STANDALONE_NUMERIC_RE.fullmatch(part):
+        return ""
+    return part
+
+
 def _clean_product_name(text: str) -> str:
-    text = re.sub(r"\s+", " ", text).strip(" -|•\t\n")
+    text = re.sub(r"\s+", " ", str(text or "")).strip(" -|•\t\n")
     parts: list[str] = []
     seen: set[str] = set()
     for part in re.split(r"\s{2,}|\|", text):
-        part = part.strip()
-        if len(part) < 2 or _NON_NAME_RE.search(part):
+        part = _sanitize_name_fragment(part)
+        if not part:
             continue
-        key = part.lower()
+        key = re.sub(r"\s+", " ", part.lower())
         if key not in seen:
             seen.add(key)
             parts.append(part)
@@ -442,7 +547,7 @@ def _extract_name_ru(
             continue
         if not (_CYR_RE.search(text) or len(text) > 5):
             continue
-        if _NON_NAME_RE.search(text):
+        if not _sanitize_name_fragment(text):
             continue
         xs = [p[0] for p in box_pts]
         ys = [p[1] for p in box_pts]
@@ -551,7 +656,7 @@ def _extract_additional_info(
             continue
         if product_name and _box_text_similarity(text, product_name) > 0.65:
             continue
-        if _NON_NAME_RE.search(text):
+        if not _sanitize_name_fragment(text):
             continue
         extras.append(text)
     return " | ".join(extras[:3]) if extras else ABSENT_VALUE
@@ -632,7 +737,7 @@ def parse_ocr_result(
             for b in info_boxes
             if len(b.text) > 3
             and b.conf > 0.45
-            and not _NON_NAME_RE.search(b.text)
+            and _sanitize_name_fragment(b.text)
         ]
         product_name = _clean_product_name(" ".join(name_candidates[:6]))
 
