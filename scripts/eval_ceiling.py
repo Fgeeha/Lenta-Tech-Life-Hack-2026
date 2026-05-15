@@ -22,7 +22,9 @@ from shelf.ocr.engine import OCREngine
 from shelf.ocr.parser import parse_ocr_result
 from shelf.ocr.preprocess import ocr_variants
 from shelf.ocr.template import classify_color
+from shelf.postproc.catalog import load_catalog_from_env
 from shelf.postproc.merge import merge
+from shelf.postproc.pass80 import optimize_tag
 from shelf.postproc.voting import merge_candidate_tags
 from shelf.qr.decoder import decode_barcode, decode_qr
 from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS
@@ -232,6 +234,7 @@ def _extract_one(
             qr_fields,
         )
     )
+    merged, _ = optimize_tag(merged, catalog=load_catalog_from_env())
     return merged.__dict__
 
 
