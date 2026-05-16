@@ -69,3 +69,34 @@ def test_opencv_barcode_returns_list_on_blank_image():
     blank = np.ones((64, 64, 3), dtype=np.uint8) * 200
     result = _try_opencv_barcode(blank)
     assert isinstance(result, list)
+
+
+def test_decode_qr_wechat_fast_returns_dict_on_blank():
+    from shelf.qr.decoder import decode_qr_wechat_fast
+
+    blank = np.ones((200, 300, 3), dtype=np.uint8) * 200
+    result = decode_qr_wechat_fast(blank)
+    assert isinstance(result, dict)
+
+
+def test_decode_qr_wechat_fast_handles_tiny_image():
+    from shelf.qr.decoder import decode_qr_wechat_fast
+
+    tiny = np.ones((5, 5, 3), dtype=np.uint8)
+    result = decode_qr_wechat_fast(tiny)
+    assert isinstance(result, dict)
+
+
+def test_qr_zone_sharpness_bottom_right():
+    from shelf.detect.tracker import _qr_zone_sharpness
+
+    # Bottom-right should have higher variance than a uniform image.
+    crop = np.zeros((200, 300, 3), dtype=np.uint8)
+    # Put noise in bottom-right (QR zone).
+    crop[120:, 150:] = np.random.randint(0, 255, (80, 150, 3), dtype=np.uint8)
+    score = _qr_zone_sharpness(crop)
+    assert score > 0
+
+    # Uniform image → near-zero sharpness.
+    uniform = np.ones((200, 300, 3), dtype=np.uint8) * 128
+    assert _qr_zone_sharpness(uniform) < 1.0
