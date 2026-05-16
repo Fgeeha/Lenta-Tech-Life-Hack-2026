@@ -54,6 +54,37 @@ def test_catalog_value_beats_ocr_garbage_for_same_barcode(tmp_path):
     assert tag.product_name == "Молоко питьевое пастеризованное"
 
 
+def test_catalog_fills_id_sku_from_barcode(tmp_path):
+    csv_path = tmp_path / "gt.csv"
+    pd.DataFrame(
+        [
+            {
+                "barcode": "4607124143901",
+                "qr_code_barcode": "4607124143901",
+                "id_sku": "270108726573",
+                "product_name": "Вино тестовое",
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+    catalog = build_catalog_from_csvs([csv_path])
+    # Lookup by barcode → id_sku should be filled when missing in tag
+    [tag] = apply_catalog([PriceTag(barcode="4607124143901")], catalog)
+    assert tag.id_sku == "270108726573"
+
+
+def test_catalog_does_not_overwrite_existing_id_sku(tmp_path):
+    csv_path = tmp_path / "gt.csv"
+    pd.DataFrame(
+        [{"barcode": "4607124143901", "id_sku": "270108726573", "product_name": "X"}]
+    ).to_csv(csv_path, index=False)
+    catalog = build_catalog_from_csvs([csv_path])
+    # Tag already has a different id_sku — should not be overwritten
+    [tag] = apply_catalog(
+        [PriceTag(barcode="4607124143901", id_sku="999999999999")], catalog
+    )
+    assert tag.id_sku == "999999999999"
+
+
 def test_catalog_does_not_fill_without_valid_key(tmp_path):
     csv_path = tmp_path / "gt.csv"
     pd.DataFrame(

@@ -2,7 +2,13 @@
 
 import numpy as np
 
-from shelf.qr.decoder import _barcode_roi_variants, _roi_boxes, _roi_variants
+from shelf.qr.decoder import (
+    _barcode_roi_variants,
+    _roi_boxes,
+    _roi_variants,
+    _try_opencv_barcode,
+    _try_wechat_qr,
+)
 
 
 def test_roi_boxes_are_inside_image():
@@ -49,3 +55,17 @@ def test_template_roi_variants_precede_geometric_fallbacks():
     variants = _template_roi_variants(crop, kind="qr")
     assert variants
     assert all(v.size > 0 for v in variants)
+
+
+def test_wechat_qr_returns_list_on_blank_image():
+    # WeChatQR should return empty list, not raise, on a blank image.
+    blank = np.ones((64, 64, 3), dtype=np.uint8) * 200
+    result = _try_wechat_qr(blank)
+    assert isinstance(result, list)
+
+
+def test_opencv_barcode_returns_list_on_blank_image():
+    # BarcodeDetector should return empty list, not raise, on a blank image.
+    blank = np.ones((64, 64, 3), dtype=np.uint8) * 200
+    result = _try_opencv_barcode(blank)
+    assert isinstance(result, list)

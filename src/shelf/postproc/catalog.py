@@ -30,6 +30,7 @@ class CatalogEntry:
     """One locally known product keyed by barcode or SKU."""
 
     product_name: str = ""
+    id_sku: str = ""
     price_default: str = ""
     price_card: str = ""
     price_discount: str = ""
@@ -86,8 +87,10 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
             name = _clean_name(row.get("product_name", ""))
             if not name:
                 continue
+            sku_raw = normalize_sku(row.get("id_sku", ""))
             entry = CatalogEntry(
                 product_name=name,
+                id_sku=sku_raw,
                 price_default=_normalize_price_text(
                     row.get("price_default", ""), comma=True
                 ),
@@ -112,14 +115,13 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
                 allow_append_12=False,
                 allow_drop_14=True,
             )
-            sku = normalize_sku(row.get("id_sku", ""))
             for key in {barcode, qr_barcode} - {""}:
                 catalog.by_barcode[key] = _merge_catalog_entry(
                     catalog.by_barcode.get(key), entry
                 )
-            if sku:
-                catalog.by_sku[sku] = _merge_catalog_entry(
-                    catalog.by_sku.get(sku), entry
+            if sku_raw:
+                catalog.by_sku[sku_raw] = _merge_catalog_entry(
+                    catalog.by_sku.get(sku_raw), entry
                 )
     return catalog
 
@@ -163,6 +165,8 @@ def apply_catalog(
             str(data.get("product_name", "")), entry.product_name
         ):
             data["product_name"] = entry.product_name
+        if entry.id_sku and str(data.get("id_sku", "")).strip() in _EMPTY:
+            data["id_sku"] = entry.id_sku
         for field_name in _PRICE_COLUMNS:
             if data.get(field_name) in _EMPTY and getattr(entry, field_name):
                 data[field_name] = getattr(entry, field_name)
@@ -178,6 +182,8 @@ def _merge_catalog_entry(
     # Keep the longest clean name; fill prices only when they are stable/non-empty.
     if len(new.product_name) > len(existing.product_name):
         existing.product_name = new.product_name
+    if not existing.id_sku and new.id_sku:
+        existing.id_sku = new.id_sku
     for field_name in _PRICE_COLUMNS:
         current = getattr(existing, field_name)
         incoming = getattr(new, field_name)

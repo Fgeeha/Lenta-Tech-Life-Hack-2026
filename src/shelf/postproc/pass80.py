@@ -271,6 +271,12 @@ def optimize_tag(
                         "catalog_name",
                     )
                 )
+            if entry.id_sku and _is_missing(str(data.get("id_sku", "")), absent_is_missing=True):
+                old_sku = str(data.get("id_sku", "") or "")
+                data["id_sku"] = entry.id_sku
+                changes.append(
+                    Pass80Change(row_index, "id_sku", old_sku, entry.id_sku, "catalog_id_sku")
+                )
             for field_name in ("price_default", "price_card"):
                 price = _normalize_price_for_field(
                     getattr(entry, field_name, ""), comma=True

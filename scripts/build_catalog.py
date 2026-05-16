@@ -35,7 +35,7 @@ def main() -> None:
         rows.append(
             {
                 "barcode": barcode,
-                "id_sku": "",
+                "id_sku": entry.id_sku,
                 "product_name": entry.product_name,
                 "price_default": entry.price_default,
                 "price_card": entry.price_card,
