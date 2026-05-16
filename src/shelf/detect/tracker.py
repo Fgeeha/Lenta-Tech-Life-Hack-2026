@@ -51,11 +51,12 @@ class TrackState:
 def _qr_zone_sharpness(crop: np.ndarray) -> float:
     """Laplacian variance of the expected QR-code zone in a price-tag crop.
 
-    After 90°-CCW rotation the QR is in the top-right quadrant of the crop.
-    A high value means the QR zone is sharp — more likely to be decodable.
+    In the raw (unrotated) crop the tag is mounted 90°-CW, so the QR code
+    occupies the bottom-right quadrant.  A high value means the QR zone is
+    sharp — more likely to be decodable by WeChatQR.
     """
     h, w = crop.shape[:2]
-    roi = crop[: int(h * 0.60), int(w * 0.40) :]
+    roi = crop[int(h * 0.40) :, int(w * 0.40) :]  # bottom-right quadrant
     if roi.size == 0:
         return 0.0
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
