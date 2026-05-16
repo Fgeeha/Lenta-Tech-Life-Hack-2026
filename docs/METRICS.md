@@ -48,4 +48,4 @@
 | 2026-05-16 | 46767be | ceiling (GT bboxes) | 0.011 | avg_field=0.227; no_qr=0.004; avg_no_qr=0.252; has_qr_no_qr=0.004; no_qr_gt_no_qr=0.000; bc=4; qr_bc=4; 25_12-20=0.000  25_2-10=0.000  26_12-20=0.042  43_15=0.000  49_5=0.000 |
 | 2026-05-16 | 4be75bc | ceiling (GT bboxes) | 0.011 | Stage A final: avg_field=0.227; GT analysis: 98.2% tags need QR; barcode zone unreadable at 8x zoom; 3/274 QR decoded |
 | 2026-05-16 | 7731bf5 | production pipeline | — | Stage B: QR-zone sharpness tracking in ByteTrack; fallback decode_qr on best_qr_frame; production eval running |
-| 2026-05-16 | 14b5bc0 | ceiling+multiframe | — | Stage B eval: SHELF_QR_MULTIFRAME_RADIUS_MS=300 ceiling eval running (±300ms, 50ms steps) |
+| 2026-05-16 | 14b5bc0 | ceiling+multiframe | 0.011 | ±300ms 50ms steps: NO additional QR decodes. 271/274 QR codes unreadable in ALL video frames. Fundamental video quality limit confirmed. 3/274 QR only at ts=15833ms in 26_12-20. |
