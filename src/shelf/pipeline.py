@@ -332,6 +332,29 @@ def run(
         best = merge_candidate_tags(
             candidate_tags, candidate_scores=[c.score for c in candidates]
         )
+
+        # Stage B: if no QR decoded from top-K candidates, retry on the frame
+        # whose QR zone is sharpest (tracked independently of OCR quality).
+        if (
+            best.qr_code_barcode in ("", "нет")
+            and state.best_qr_frame is not None
+        ):
+            already_tried = any(
+                abs(c.timestamp_ms - state.best_qr_ts) < 50 for c in candidates
+            )
+            if not already_tried:
+                extra_qr = decode_qr(
+                    state.best_qr_frame,
+                    track_id=int(tid),
+                    timestamp_ms=state.best_qr_ts,
+                    debug_dir=debug_path,
+                )
+                if extra_qr:
+                    best = merge(best, extra_qr)
+                    logger.info(
+                        "QR fallback decoded for track %d at %.0fms", tid, state.best_qr_ts
+                    )
+
         tags.append(best)
         if progress_callback and len(best_tracks) > 0:
             _progress(

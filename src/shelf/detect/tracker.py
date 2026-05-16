@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
 from shelf.detect.detector import Detection
@@ -40,6 +41,25 @@ class TrackState:
     best_ts: float = 0.0
     n_seen: int = 0
     candidates: list[TrackCandidate] = field(default_factory=list, repr=False)
+    # Frame with the sharpest QR zone — scored independently of OCR quality.
+    # Used as a fallback decode attempt when standard candidates miss the QR.
+    best_qr_frame: "np.ndarray | None" = field(default=None, repr=False)
+    best_qr_score: float = 0.0
+    best_qr_ts: float = 0.0
+
+
+def _qr_zone_sharpness(crop: np.ndarray) -> float:
+    """Laplacian variance of the expected QR-code zone in a price-tag crop.
+
+    After 90°-CCW rotation the QR is in the top-right quadrant of the crop.
+    A high value means the QR zone is sharp — more likely to be decodable.
+    """
+    h, w = crop.shape[:2]
+    roi = crop[: int(h * 0.60), int(w * 0.40) :]
+    if roi.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if roi.ndim == 3 else roi
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def _clip_box(
@@ -204,6 +224,7 @@ class Tracker:
         sharp = laplacian_sharpness(crop)
         # Larger crop area helps OCR, but glare/blur are penalized by frame_quality_score.
         score = float(det.area) * (1.0 + frame_quality_score(crop))
+        qr_score = _qr_zone_sharpness(crop)
 
         if tid not in self._states:
             self._states[tid] = TrackState(
@@ -213,14 +234,22 @@ class Tracker:
                 best_frame=crop.copy(),
                 best_ts=timestamp_ms,
                 n_seen=1,
+                best_qr_frame=crop.copy(),
+                best_qr_score=qr_score,
+                best_qr_ts=timestamp_ms,
             )
         else:
-            self._states[tid].n_seen += 1
-            if score > self._states[tid].best_score:
-                self._states[tid].best_det = det
-                self._states[tid].best_score = score
-                self._states[tid].best_frame = crop.copy()
-                self._states[tid].best_ts = timestamp_ms
+            state = self._states[tid]
+            state.n_seen += 1
+            if score > state.best_score:
+                state.best_det = det
+                state.best_score = score
+                state.best_frame = crop.copy()
+                state.best_ts = timestamp_ms
+            if qr_score > state.best_qr_score:
+                state.best_qr_score = qr_score
+                state.best_qr_frame = crop.copy()
+                state.best_qr_ts = timestamp_ms
 
         cand = TrackCandidate(
             det=det,
