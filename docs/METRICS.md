@@ -51,3 +51,4 @@
 | 2026-05-16 | 14b5bc0 | ceiling+multiframe | 0.011 | ±300ms 50ms steps: NO additional QR decodes. 271/274 QR codes unreadable in ALL video frames. Fundamental video quality limit confirmed. 3/274 QR only at ts=15833ms in 26_12-20. |
 | 2026-05-16 | 1cb2096 | labeled-5 fast(k=1,1fps) | 0.000 | avg_field=0.101; qr_bc=0; 1fps sampling MISSED ts=15833ms (QR window ~150ms wide). Adaptive 4fps required to catch QR-readable frames. |
 | 2026-05-17 | 721bf60 | ceiling (Phase A pre-commit, old code) | 0.011 | avg_field=0.227; Phase A code was in working tree; derive.py running; 3/274 pass; 25_12-20=0.000 25_2-10=0.000 26_12-20=0.042 43_15=0.000 49_5=0.000 |
+| 2026-05-17 | 266781d | ceiling (Phase A committed + derive.py active) | 0.011 | avg_field=0.227; no change vs pre-commit — confirms defaults.py has zero eval impact (eval treats ""=="нет"); derive.py already running; SR eval launched next (SHELF_SR_ENABLED=1) |
