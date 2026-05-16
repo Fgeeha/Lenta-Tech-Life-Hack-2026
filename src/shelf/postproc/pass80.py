@@ -63,7 +63,8 @@ _EMPTY_TEXT = {"", "nan", "none"}
 _PRICE_QR_TO_OCR = {
     "price1_qr": "price_default",
     "price4_qr": "price_card",
-    "price2_qr": "price_card",
+    # price2_qr is the 5%-discount intermediate tier, NOT the card price.
+    # Filling price_card from price2_qr would be wrong (239.99 ≠ 129.99).
     "action_price_qr": "price_card",
 }
 # Reverse direction: OCR fields → QR fields.
