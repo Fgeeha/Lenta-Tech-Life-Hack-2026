@@ -657,30 +657,36 @@ def decode_qr(
         ("orig", crop),
         ("rot90ccw", cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)),
     ]
+    # Only try the primary QR ROI at 4× zoom — the Lenta QR pattern is always
+    # in the top-right after 90°-CCW rotation (~40 px → 160 px is decodable).
+    # 2x was never the first to succeed and adding more ROIs/scales multiplies
+    # timeout budget (each _try_wechat_qr call may hang up to SHELF_WECHAT_QR_TIMEOUT).
     for rot_name, rot_img in _wechat_rotations:
-        for roi_name, roi in _named_template_rois(rot_img, {"qr"})[:3]:
-            if roi is None or roi.size == 0:
-                continue
-            h_r, w_r = roi.shape[:2]
-            for scale in (2.0, 4.0):
-                zoomed = cv2.resize(
-                    roi,
-                    (max(1, int(w_r * scale)), max(1, int(h_r * scale))),
-                    interpolation=cv2.INTER_CUBIC,
+        rois = _named_template_rois(rot_img, {"qr"})
+        if not rois:
+            continue
+        roi_name, roi = rois[0]
+        if roi is None or roi.size == 0:
+            continue
+        h_r, w_r = roi.shape[:2]
+        zoomed = cv2.resize(
+            roi,
+            (max(1, int(w_r * 4.0)), max(1, int(h_r * 4.0))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        for raw in _try_wechat_qr(zoomed):
+            parsed = _raw_to_fields(raw)
+            if parsed:
+                _log_success(
+                    debug_dir,
+                    track_id=track_id,
+                    timestamp_ms=timestamp_ms,
+                    source="qr_wechat_roi",
+                    raw=raw,
+                    normalized=_success_value(parsed),
+                    roi_type=f"{rot_name}:{roi_name}:x4",
                 )
-                for raw in _try_wechat_qr(zoomed):
-                    parsed = _raw_to_fields(raw)
-                    if parsed:
-                        _log_success(
-                            debug_dir,
-                            track_id=track_id,
-                            timestamp_ms=timestamp_ms,
-                            source="qr_wechat_roi",
-                            raw=raw,
-                            normalized=_success_value(parsed),
-                            roi_type=f"{rot_name}:{roi_name}:x{scale:.0f}",
-                        )
-                        return parsed
+                return parsed
 
     # Step 2: cheap decoders on full crop (pyzbar reads linear EAN-13 barcode
     # strip; returns only barcode number without price fields).
