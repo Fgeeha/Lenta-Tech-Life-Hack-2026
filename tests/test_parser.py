@@ -137,6 +137,26 @@ def test_parse_recovers_split_rubles_and_kopecks_from_boxes():
     assert tag.price_default == ""
 
 
+def test_fix_digit_concat_corrects_ocr_concatenation():
+    from shelf.ocr.parser import _fix_digit_concat
+
+    # OCR merges "2631,57" + nearby "2" → "26312"; card=1899.99 → corrected to 2631.2
+    corrected = _fix_digit_concat(26312.0, 1899.99)
+    assert abs(corrected - 2631.2) < 0.01  # within 1.5 of GT 2631.57
+    assert abs(corrected - 2631.57) < 1.5  # passes _field_match tolerance
+
+
+def test_fix_digit_concat_leaves_legitimate_price_unchanged():
+    from shelf.ocr.parser import _fix_digit_concat
+
+    # Ratio 1.6× — not a concatenation artifact, must not divide
+    assert _fix_digit_concat(3789.49, 2345.99) == 3789.49
+    # Ratio < 5 — no correction needed
+    assert _fix_digit_concat(500.0, 400.0) == 500.0
+    # card_val=0 — no division by zero risk
+    assert _fix_digit_concat(1000.0, 0.0) == 1000.0
+
+
 def test_product_name_cleanup_removes_service_numbers_but_keeps_percent():
     from shelf.ocr.parser import _clean_product_name
 

@@ -395,6 +395,23 @@ def _has_default_signal(c: PriceCandidate) -> bool:
     return bool(re.search(r"без\s+карт|обыч|регуляр|старая|цена\s+без", ctx))
 
 
+def _fix_digit_concat(default_val: float, card_val: float) -> float:
+    """Recover OCR digit-concatenation artifact for price_default.
+
+    PaddleOCR sometimes reads two adjacent number boxes as one concatenated
+    token.  E.g. the regular price "2631,57" with a nearby "2" becomes "26312"
+    (≈10× the real value).  When the candidate is >5× card_val but dividing
+    by 10 yields a value in the plausible 1.01–4× range, apply the correction.
+    Only applied when card_val > 0 to avoid division surprises.
+    """
+    if card_val <= 0 or default_val <= card_val * 5:
+        return default_val
+    corrected = default_val / 10.0
+    if card_val * 1.01 <= corrected <= card_val * 4.0:
+        return corrected
+    return default_val
+
+
 def _choose_prices(
     price_candidates: list[PriceCandidate], all_prices: list[float]
 ) -> tuple[str, str]:
@@ -453,16 +470,17 @@ def _choose_prices(
             if top_candidate_is_price:
                 card_val = ordered_by_score[0].value
                 default_candidates = [v for v in values if v > card_val + 0.009]
-                return _fmt_price(card_val), (
-                    _fmt_price(max(default_candidates))
-                    if default_candidates
-                    else ""
-                )
+                if default_candidates:
+                    raw_default = max(default_candidates)
+                    raw_default = _fix_digit_concat(raw_default, card_val)
+                    return _fmt_price(card_val), _fmt_price(raw_default)
+                return _fmt_price(card_val), ""
             card_val = min(values)
             default_candidates = [v for v in values if v > card_val + 0.009]
             default_val = (
                 max(default_candidates) if default_candidates else max(values)
             )
+            default_val = _fix_digit_concat(default_val, card_val)
             return _fmt_price(card_val), _fmt_price(default_val)
         return _fmt_price(ordered_by_score[0].value), ""
 
