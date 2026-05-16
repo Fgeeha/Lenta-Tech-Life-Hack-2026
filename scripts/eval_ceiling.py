@@ -26,7 +26,7 @@ from shelf.postproc.catalog import load_catalog_from_env
 from shelf.postproc.merge import merge
 from shelf.postproc.pass80 import optimize_tag
 from shelf.postproc.voting import merge_candidate_tags
-from shelf.qr.decoder import decode_barcode, decode_qr
+from shelf.qr.decoder import decode_barcode, decode_qr, decode_qr_wechat_fast
 from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -34,6 +34,24 @@ logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("Данные")
 LABELED_NAMES = ["25_12-20", "25_2-10", "26_12-20", "43_15", "49_5"]
+
+# Set SHELF_QR_MULTIFRAME_RADIUS_MS>0 to also try nearby frames for QR decode.
+# Each offset adds one decode_qr_wechat_fast() call (~0.05-0.2s); 0 = disabled.
+_QR_MF_RADIUS_MS = int(
+    __import__("os").environ.get("SHELF_QR_MULTIFRAME_RADIUS_MS", "0")
+)
+_QR_MF_STEP_MS = int(
+    __import__("os").environ.get("SHELF_QR_MULTIFRAME_STEP_MS", "50")
+)
+_QR_MULTIFRAME_OFFSETS_MS: list[int] = (
+    [
+        off
+        for off in range(-_QR_MF_RADIUS_MS, _QR_MF_RADIUS_MS + 1, _QR_MF_STEP_MS)
+        if off != 0
+    ]
+    if _QR_MF_RADIUS_MS > 0
+    else []
+)
 
 QR_EVAL_FIELDS = {
     "qr_code_barcode",
@@ -281,6 +299,44 @@ def eval_video(
             continue
 
         pred = _extract_one(frame, gt_row, ocr, ocr_ru)
+
+        # Multi-frame QR fallback: if QR not decoded from GT-timestamp frame,
+        # try nearby offsets with a lightweight WeChatQR scan (~0.05-0.2s/frame).
+        # Enabled via SHELF_QR_MULTIFRAME_RADIUS_MS env var (default 0 = off).
+        if _QR_MULTIFRAME_OFFSETS_MS and not _present(pred.get("qr_code_barcode")):
+            x1r = int(gt_row.x_min); y1r = int(gt_row.y_min)
+            x2r = int(gt_row.x_max); y2r = int(gt_row.y_max)
+            fh_r, fw_r = frame.shape[:2]
+            mx_r = max(5, int((x2r - x1r) * 0.10))
+            my_r = max(5, int((y2r - y1r) * 0.10))
+            x1r = max(0, x1r - mx_r); y1r = max(0, y1r - my_r)
+            x2r = min(fw_r, x2r + mx_r); y2r = min(fh_r, y2r + my_r)
+            for off_ms in _QR_MULTIFRAME_OFFSETS_MS:
+                alt_ts = ts_ms + off_ms
+                if alt_ts < 0:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_MSEC, alt_ts)
+                ok, alt_frame = cap.read()
+                if not ok:
+                    continue
+                alt_fh, alt_fw = alt_frame.shape[:2]
+                alt_crop = alt_frame[
+                    y1r : min(alt_fh, y2r), x1r : min(alt_fw, x2r)
+                ]
+                if alt_crop.size == 0:
+                    continue
+                extra_qr = decode_qr_wechat_fast(alt_crop)
+                if extra_qr:
+                    for k, v in extra_qr.items():
+                        if k not in pred or not _present(pred.get(k)):
+                            pred[k] = v
+                    # Sync barcode ↔ qr_code_barcode
+                    if _present(pred.get("qr_code_barcode")) and not _present(pred.get("barcode")):
+                        pred["barcode"] = pred["qr_code_barcode"]
+                    logger.info("QR multiframe decode at offset %+dms", off_ms)
+                    break
+            # Restore cap position after multi-frame scan
+            cap.set(cv2.CAP_PROP_POS_MSEC, ts_ms)
 
         barcode_count += int(_present(pred.get("barcode")))
         qr_barcode_count += int(_present(pred.get("qr_code_barcode")))

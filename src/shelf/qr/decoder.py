@@ -521,6 +521,34 @@ def _barcode_roi_variants(crop: np.ndarray) -> list[np.ndarray]:
     return [img for _, img in _named_roi_variants(crop, "barcode")]
 
 
+def decode_qr_wechat_fast(crop: np.ndarray) -> dict[str, str]:
+    """Lightweight WeChatQR scan: 90°CCW rotation + top-right QR zone at 4× zoom.
+
+    Used for multi-frame fallback scans where running the full decode_qr()
+    cascade (~4.8 s per fail) is too expensive.  Each call takes ≈0.05–0.2 s.
+    Returns parsed QR URL fields (qr_code_barcode, price1_qr …) or {}.
+    """
+    if crop is None or crop.size == 0:
+        return {}
+    rot = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    rh, rw = rot.shape[:2]
+    qr_zone = rot[: int(rh * 0.60), int(rw * 0.40) :]
+    if qr_zone.size == 0:
+        return {}
+    qzh, qzw = qr_zone.shape[:2]
+    for scale in (4.0, 2.0):
+        zoomed = cv2.resize(
+            qr_zone,
+            (max(1, int(qzw * scale)), max(1, int(qzh * scale))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        for raw in _try_wechat_qr(zoomed):
+            parsed = _raw_to_fields(raw)
+            if parsed:
+                return parsed
+    return {}
+
+
 def _raw_to_fields(raw: str) -> dict[str, str]:
     raw = str(raw).strip()
     if not raw:
