@@ -155,11 +155,15 @@ def preprocess_crop(
     clahe: bool = False,
     glare: bool = True,
     perspective: bool = False,
+    use_sr: bool | None = None,
 ) -> np.ndarray:
     """Prepare a price-tag crop for OCR.
 
     Most supplied Lenta frames store tags sideways; when ``rotate_180`` is True
     we rotate 90° counter-clockwise, matching the previous project behavior.
+
+    When ``use_sr`` is None the SHELF_SR_ENABLED environment variable controls
+    whether RealESRGAN 4x super-resolution replaces the Lanczos upscale step.
     """
     if crop is None or crop.size == 0:
         return crop
@@ -180,7 +184,13 @@ def preprocess_crop(
         if 1.0 < abs(angle) < 20:
             img = _rotate_image(img, angle)
 
-    if upscale > 1:
+    # SR replaces Lanczos upscale when enabled.
+    _use_sr = use_sr if use_sr is not None else _sr_enabled()
+    if _use_sr:
+        from shelf.ocr.sr import upscale_crop as _sr_upscale
+
+        img = _sr_upscale(img)
+    elif upscale > 1:
         h, w = img.shape[:2]
         img = cv2.resize(
             img, (w * upscale, h * upscale), interpolation=cv2.INTER_LANCZOS4
@@ -198,25 +208,44 @@ def preprocess_crop(
     return img
 
 
+def _sr_enabled() -> bool:
+    from shelf.ocr.sr import is_enabled
+
+    return is_enabled()
+
+
 def ocr_variants(crop: np.ndarray) -> list[np.ndarray]:
     """Small set of OCR variants ordered from safest to most aggressive."""
     if crop is None or crop.size == 0:
         return []
+
+    if _sr_enabled():
+        # Pre-process once (no upscale), then run SR once → 3 post-processing variants.
+        base = preprocess_crop(
+            crop, upscale=1, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
+        )
+        from shelf.ocr.sr import upscale_crop as _sr_upscale
+
+        sr_img = _sr_upscale(base)
+        _k = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        return [
+            sr_img,
+            enhance_contrast(sr_img.copy()),
+            cv2.filter2D(sr_img, -1, _k),
+        ]
+
     base = preprocess_crop(
-        crop, upscale=2, glare=True, deskew=True, sharpen=False, clahe=False
+        crop, upscale=2, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
     )
-    variants = [base]
-    variants.append(
+    return [
+        base,
         preprocess_crop(
-            crop, upscale=3, glare=True, deskew=True, sharpen=False, clahe=True
-        )
-    )
-    variants.append(
+            crop, upscale=3, glare=True, deskew=True, sharpen=False, clahe=True, use_sr=False
+        ),
         preprocess_crop(
-            crop, upscale=2, glare=True, deskew=True, sharpen=True, clahe=False
-        )
-    )
-    return variants
+            crop, upscale=2, glare=True, deskew=True, sharpen=True, clahe=False, use_sr=False
+        ),
+    ]
 
 
 def qr_variants(crop: np.ndarray) -> list[np.ndarray]:
