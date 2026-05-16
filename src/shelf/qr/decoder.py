@@ -557,32 +557,18 @@ def decode_qr(
     if crop is None or crop.size == 0 or _decode_mode() == "off":
         return {}
 
-    # Fast pass: cheap decoders on 4 rotations of the full crop (~0.07 s total).
     _fast_rotations = [
         ("orig", crop),
         ("rot90ccw", cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)),
         ("rot180", cv2.rotate(crop, cv2.ROTATE_180)),
         ("rot90cw", cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)),
     ]
-    for rot_name, rot_img in _fast_rotations:
-        for raw in _try_pyzbar(rot_img) + _try_opencv(rot_img):
-            parsed = _raw_to_fields(raw)
-            if parsed:
-                _log_success(
-                    debug_dir,
-                    track_id=track_id,
-                    timestamp_ms=timestamp_ms,
-                    source="qr_fast_cheap",
-                    raw=raw,
-                    normalized=_success_value(parsed),
-                    roi_type=rot_name,
-                )
-                return parsed
 
-    # WeChatQR targeted pass: extract template QR ROIs at 2× and 4× zoom, then
-    # run WeChatQR on each.  WeChatQR fails on the full crop (QR is too small),
-    # but succeeds on zoomed template regions (~4.8 s for 4 rotations × 2 ROIs
-    # × 2 scales × 0.3 s per call).
+    # Step 1: WeChatQR on template QR ROIs (2× and 4× zoom) — runs FIRST because
+    # it returns the full QR URL (barcode + all price fields) whereas pyzbar only
+    # reads the linear EAN-13 barcode strip.  WeChatQR fails on the full crop
+    # (QR too small) but succeeds on the zoomed template region in ~0.1 s when
+    # the code is readable (~4.8 s overhead when it fails across 4 rotations).
     for rot_name, rot_img in _fast_rotations:
         for roi_name, roi in _named_template_rois(rot_img, {"qr"})[:3]:
             if roi is None or roi.size == 0:
@@ -607,6 +593,23 @@ def decode_qr(
                             roi_type=f"{rot_name}:{roi_name}:x{scale:.0f}",
                         )
                         return parsed
+
+    # Step 2: cheap decoders on full crop (pyzbar reads linear EAN-13 barcode
+    # strip; returns only barcode number without price fields).
+    for rot_name, rot_img in _fast_rotations:
+        for raw in _try_pyzbar(rot_img) + _try_opencv(rot_img):
+            parsed = _raw_to_fields(raw)
+            if parsed:
+                _log_success(
+                    debug_dir,
+                    track_id=track_id,
+                    timestamp_ms=timestamp_ms,
+                    source="qr_fast_cheap",
+                    raw=raw,
+                    normalized=_success_value(parsed),
+                    roi_type=rot_name,
+                )
+                return parsed
 
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
     for source, img in _named_roi_variants(crop, "qr")[:roi_limit]:
