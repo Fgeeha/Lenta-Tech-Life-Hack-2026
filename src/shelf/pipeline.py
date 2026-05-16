@@ -24,7 +24,7 @@ from shelf.postproc.dedup import deduplicate_tags, tag_completeness
 from shelf.postproc.merge import merge
 from shelf.postproc.pass80 import optimize_tags
 from shelf.postproc.voting import merge_candidate_tags
-from shelf.qr.decoder import decode_barcode, decode_qr
+from shelf.qr.decoder import decode_barcode, decode_qr, decode_qr_wechat_fast
 from shelf.schema import OUTPUT_COLUMNS, PriceTag
 
 logger = logging.getLogger(__name__)
@@ -343,12 +343,7 @@ def run(
                 abs(c.timestamp_ms - state.best_qr_ts) < 50 for c in candidates
             )
             if not already_tried:
-                extra_qr = decode_qr(
-                    state.best_qr_frame,
-                    track_id=int(tid),
-                    timestamp_ms=state.best_qr_ts,
-                    debug_dir=debug_path,
-                )
+                extra_qr = decode_qr_wechat_fast(state.best_qr_frame)
                 if extra_qr:
                     best = merge(best, extra_qr)
                     logger.info(
