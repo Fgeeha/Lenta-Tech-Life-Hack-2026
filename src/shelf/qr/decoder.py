@@ -6,6 +6,8 @@ import csv
 import logging
 import os
 import re
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlparse
 
@@ -17,6 +19,34 @@ from shelf.qr.barcode_roi import ean13_repair
 from shelf.validation import normalize_ean13
 
 logger = logging.getLogger(__name__)
+
+
+class _NativeTimeout(Exception):
+    """Raised when SIGALRM fires inside a native QR/barcode call."""
+
+
+@contextmanager
+def _alarm_timeout(seconds: float):
+    """Hard timeout via SIGALRM. Unix-only, main thread only."""
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise _NativeTimeout()
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+# Configurable per-call timeouts (override via env vars).
+_WECHAT_TIMEOUT = float(os.getenv("SHELF_WECHAT_QR_TIMEOUT", "2.0"))
+_QREADER_TIMEOUT = float(os.getenv("SHELF_QREADER_TIMEOUT", "4.0"))
 
 # Canonical lower-case key -> schema field. ``parse_qr_url`` is case-insensitive.
 _KEY_MAP: dict[str, str] = {
@@ -298,13 +328,34 @@ def _try_opencv(image: np.ndarray) -> list[str]:
     return out
 
 
-def _try_qreader(image: np.ndarray) -> list[str]:
-    try:
-        from qreader import QReader
+_QREADER: object | None = None
 
-        reader = QReader()
-        decoded = reader.detect_and_decode(image=image)
+
+def _get_qreader():
+    """Lazy-create and cache QReader (avoids re-loading YOLO weights on every call)."""
+    global _QREADER
+    if _QREADER is None:
+        try:
+            from qreader import QReader
+
+            _QREADER = QReader()
+        except Exception as exc:
+            logger.debug("QReader init failed: %s", exc)
+            _QREADER = False
+    return _QREADER if _QREADER else None
+
+
+def _try_qreader(image: np.ndarray) -> list[str]:
+    reader = _get_qreader()
+    if reader is None:
+        return []
+    try:
+        with _alarm_timeout(_QREADER_TIMEOUT):
+            decoded = reader.detect_and_decode(image=image)
         return [x for x in decoded if x]
+    except _NativeTimeout:
+        logger.warning("qreader timeout %.1fs", _QREADER_TIMEOUT)
+        return []
     except Exception as exc:
         logger.debug("qreader error: %s", exc)
         return []
@@ -325,13 +376,18 @@ def _get_wechat_qr() -> "cv2.wechat_qrcode_WeChatQRCode | None":
 
 
 def _try_wechat_qr(image: np.ndarray) -> list[str]:
-    """Decode QR codes using OpenCV WeChatQR (handles degraded/blurry codes better than pyzbar)."""
+    """Decode QR with WeChatQR + hard timeout to prevent native hang."""
     reader = _get_wechat_qr()
     if reader is None:
         return []
     try:
-        decoded, _ = reader.detectAndDecode(image)
-        return [d for d in decoded if d]
+        with _alarm_timeout(_WECHAT_TIMEOUT):
+            decoded, _ = reader.detectAndDecode(image)
+            return [d for d in decoded if d]
+    except _NativeTimeout:
+        shape = image.shape if image is not None else None
+        logger.warning("WeChatQR timeout %.1fs shape=%s", _WECHAT_TIMEOUT, shape)
+        return []
     except Exception as exc:
         logger.debug("WeChatQR decode error: %s", exc)
         return []
@@ -594,10 +650,14 @@ def decode_qr(
 
     # Step 1: WeChatQR on template QR ROIs (2× and 4× zoom) — runs FIRST because
     # it returns the full QR URL (barcode + all price fields) whereas pyzbar only
-    # reads the linear EAN-13 barcode strip.  WeChatQR fails on the full crop
-    # (QR too small) but succeeds on the zoomed template region in ~0.1 s when
-    # the code is readable (~4.8 s overhead when it fails across 4 rotations).
-    for rot_name, rot_img in _fast_rotations:
+    # reads the linear EAN-13 barcode strip.  Only 2 rotations tried: Lenta tags
+    # are always mounted at 90° (DECISIONS.md 2026-05-13), so rot180/rot90cw are
+    # redundant and each wastes up to SHELF_WECHAT_QR_TIMEOUT seconds on failure.
+    _wechat_rotations = [
+        ("orig", crop),
+        ("rot90ccw", cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+    ]
+    for rot_name, rot_img in _wechat_rotations:
         for roi_name, roi in _named_template_rois(rot_img, {"qr"})[:3]:
             if roi is None or roi.size == 0:
                 continue
