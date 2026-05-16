@@ -22,12 +22,12 @@ from shelf.ocr.engine import OCREngine
 from shelf.ocr.parser import parse_ocr_result
 from shelf.ocr.preprocess import ocr_variants
 from shelf.ocr.template import classify_color
-from shelf.postproc.catalog import load_catalog_from_env
+from shelf.postproc.catalog import apply_catalog, load_catalog_from_env
 from shelf.postproc.merge import merge
 from shelf.postproc.pass80 import optimize_tag
 from shelf.postproc.voting import merge_candidate_tags
 from shelf.qr.decoder import decode_barcode, decode_qr, decode_qr_wechat_fast
-from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS
+from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS, PriceTag
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -330,9 +330,14 @@ def eval_video(
                     for k, v in extra_qr.items():
                         if k not in pred or not _present(pred.get(k)):
                             pred[k] = v
-                    # Sync barcode ↔ qr_code_barcode
-                    if _present(pred.get("qr_code_barcode")) and not _present(pred.get("barcode")):
-                        pred["barcode"] = pred["qr_code_barcode"]
+                    # Re-run pass80 + catalog to propagate QR fields:
+                    # price1_qr→price_default, price4_qr→price_card,
+                    # barcode→id_sku+product_name via catalog, discount derivation.
+                    _catalog = load_catalog_from_env()
+                    _tag = PriceTag(**{k: pred.get(k, "") for k in PriceTag.__dataclass_fields__})
+                    [_tag] = apply_catalog([_tag], _catalog)
+                    _tag, _ = optimize_tag(_tag, catalog=_catalog)
+                    pred = _tag.__dict__
                     logger.info("QR multiframe decode at offset %+dms", off_ms)
                     break
             # Restore cap position after multi-frame scan
