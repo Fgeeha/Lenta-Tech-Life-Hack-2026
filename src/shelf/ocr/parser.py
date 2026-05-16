@@ -1,101 +1,82 @@
-"""Маппинг OCR-боксов → поля ценника.
+"""Mapping OCR boxes to price-tag fields.
 
-После поворота 90°CCW структура ценника (сверху вниз в кропе):
-  - Белая зона:    product_name, id_sku, print_datetime, barcode, QR-код
-  - Оранжевая зона: price_card (крупно), price_default (мелко), discount_amount
-
-Парсинг: сначала discount (чтобы исключить % из цен), затем цены, затем текст.
+The parser is deliberately conservative: it fills a field only when there is a
+strong pattern/validation signal. A wrong value is more harmful than an empty
+value because empty means "present but not recognized" by the task rules.
 """
+
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
+from difflib import SequenceMatcher
+from typing import TYPE_CHECKING, Iterable
 
 import cv2
 import numpy as np
 
-from shelf.qr.barcode_roi import ean13_repair, read_barcode_from_strip
-from shelf.schema import PriceTag
+from shelf.qr.barcode_roi import (
+    ean13_checksum_valid,
+    ean13_repair,
+    read_barcode_from_strip,
+)
+from shelf.schema import ABSENT_VALUE, PriceTag
+from shelf.validation import normalize_sku
 
-# --- Регулярные выражения ---
+if TYPE_CHECKING:
+    from shelf.ocr.engine import OCREngine
+# --- Regexes -----------------------------------------------------------------
 
-# Цена: 129, 129.99, 129,99.
-# Минимум 3 цифры: исключаем "99" (копейки, разделённые OCR в отдельный бокс)
-# и прочие двузначные шумы. Минимальная цена в Lenta GT ≥ 100 руб.
-_PRICE_RE = re.compile(r"\b(\d{3,6})(?:[.,](\d{2}))?\b")
+# Prices such as 129, 129.99, 1 299,99 and OCR form 129-99.
+# Percent tokens are removed before matching.
+_PRICE_RE = re.compile(
+    r"(?<!\d)(\d{1,3}(?:[\s\u00a0]?\d{3})+|\d{1,6})(?:[.,-](\d{1,2}))?(?!\d)"
+)
+_DISCOUNT_PCT_RE = re.compile(r"[-–−]?\s*(\d{1,2})\s*%")
+_DISCOUNT_RUB_RE = re.compile(
+    r"(?:[-–−]\s*)?(\d{1,5})\s*(?:р|руб\.?|₽)", re.IGNORECASE
+)
+_DATE_RE = re.compile(
+    r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\s+(\d{1,2})[:.](\d{2})"
+)
+_BARCODE_DIGITS_RE = re.compile(r"(?<!\d)(\d[\d\s\u00a0]{10,18}\d)(?!\d)")
+_SKU_RE = re.compile(r"(?<!\d)(\d[\d\s\u00a0]{8,16}\d)(?!\d)")
+_SPECIAL_RE = re.compile(r"^\s*([КкKkЛлLlШш])\s*$")
+_CODE_RE = re.compile(r"\b\d{2}\s*_\s*\d{3,6}(?:\s*[-–]\s*\d{3,6})?\b")
+_PCT_TOKEN_RE = re.compile(r"[-–−]?\s*\d{1,3}\s*%")
+_CYR_RE = re.compile(r"[а-яА-ЯёЁ]")
+_NON_NAME_RE = re.compile(
+    r"(\d{2}[.\-/]\d{2}[.\-/]\d{2,4}|\d{8,}|\b\d+[,.]?\d*\s*(?:руб|₽|%|шт|кг|г)\b)",
+    re.IGNORECASE,
+)
 
-# Скидка: -48%  -23%  48%  23%  (знак минуса опционален — OCR часто не читает)
-# Диапазон 1–99% (не 100+), чтобы не захватить коды и артикулы
-_DISCOUNT_PCT_RE = re.compile(r"[-–]?\s*(\d{1,2})\s*%")
+_NAME_DATE_RE = re.compile(
+    r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}(?:\s+\d{1,2}[:.]\d{2})?"
+)
+_NAME_LONG_DIGITS_RE = re.compile(r"\d{8,}")
+_NAME_PRICE_RE = re.compile(
+    r"(?<!\w)\d{1,5}(?:[,.\-]\d{1,2})?\s*(?:руб\.?|₽)(?!\w)",
+    re.IGNORECASE,
+)
+_STANDALONE_NUMERIC_RE = re.compile(r"^[\d\s,.\-%₽руб]+$", re.IGNORECASE)
 
-# Дата: 03.04.2026 3:08
-_DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}\s+\d{1,2}:\d{2}")
-
-# Штрихкод EAN: 8-14 цифр
-_BARCODE_RE = re.compile(r"\b\d{8,14}\b")
-
-# Артикул SKU: ровно 12 цифр (Lenta: 270207736530, 370204501518, 360108699851).
-# Не пересекается с EAN-13 (13 цифр). Сужение с 10-12 → 12 уменьшает FP.
-_SKU_RE = re.compile(r"\b\d{12}\b")
-
-# Специальный символ: К, Л, Ш
-_SPECIAL_RE = re.compile(r"\b([КкЛлШш])\b")
-
-# Код зоны: 13_043015
-_CODE_RE = re.compile(r"\b\d{2}_\d{6,}\b")
-
-# Паттерн «число+процент» — для фильтрации из ценового парсинга
-_PCT_TOKEN_RE = re.compile(r"\d+\s*%")
-
-
-def _strip_percent_tokens(text: str) -> str:
-    """Удалить токены 'NN%' из строки перед поиском цен.
-
-    BUG FIX: раньше '48%' давало price=48 вместо discount=48%.
-    """
-    return _PCT_TOKEN_RE.sub(" ", text)
-
-
-def _extract_prices(texts: list[str]) -> list[float]:
-    """Извлечь числа, похожие на цены (исключая проценты)."""
-    prices = []
-    for text in texts:
-        clean = _strip_percent_tokens(text)
-        for m in _PRICE_RE.finditer(clean):
-            integer = int(m.group(1))
-            frac = int(m.group(2)) if m.group(2) else 0
-            val = integer + frac / 100.0
-            # Разумный диапазон: 1 — 99999 руб.
-            if 1.0 <= val <= 99_999.0:
-                prices.append(val)
-    return sorted(prices)
-
-
-def _find_discount(texts: list[str]) -> str:
-    """Найти скидку в виде '−XX%' или 'XX%'.
-
-    BUG FIX: раньше требовался знак минуса, но OCR часто читает '48%' без него.
-    """
-    for text in texts:
-        m = _DISCOUNT_PCT_RE.search(text)
-        if m:
-            pct = int(m.group(1))
-            if 1 <= pct <= 99:
-                return f"-{pct}%"
-    return "нет"
-
-
-def _find_orange_rows(img: np.ndarray) -> tuple[int, int]:
-    """Найти строки с оранжевым фоном (ценовая зона)."""
-    if img is None or img.size == 0:
-        return 0, img.shape[0] if img is not None else 0
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array([8, 60, 80]), np.array([40, 255, 255]))
-    row_sums = mask.sum(axis=1) / 255.0
-    threshold = img.shape[1] * 0.15
-    orange_rows = np.where(row_sums > threshold)[0]
-    if len(orange_rows) == 0:
-        return int(img.shape[0] * 0.6), img.shape[0]
-    return max(0, int(orange_rows[0]) - 10), min(img.shape[0], int(orange_rows[-1]) + 10)
+_NUMERIC_OCR_TRANSLATION = str.maketrans(
+    {
+        "O": "0",
+        "o": "0",
+        "О": "0",
+        "о": "0",
+        "I": "1",
+        "l": "1",
+        "|": "1",
+        "S": "5",
+        "s": "5",
+        "B": "8",
+        "З": "3",
+        "з": "3",
+    }
+)
 
 
 @dataclass
@@ -112,69 +93,594 @@ class OCRBox:
         return (self.y0 + self.y1) / 2
 
     @property
+    def center_x(self) -> float:
+        return (self.x0 + self.x1) / 2
+
+    @property
     def area(self) -> float:
-        return (self.x1 - self.x0) * (self.y1 - self.y0)
+        return max(0.0, self.x1 - self.x0) * max(0.0, self.y1 - self.y0)
 
 
-def _normalize_box(box: list, w: int, h: int) -> tuple[float, float, float, float]:
-    xs = [p[0] for p in box]
-    ys = [p[1] for p in box]
-    return min(xs) / w, min(ys) / h, max(xs) / w, max(ys) / h
+@dataclass
+class PriceCandidate:
+    value: float
+    text: str
+    score: float
+    box: OCRBox | None = None
+    context: str = ""
 
 
-def _fmt_price(val: float) -> str:
-    """Форматировать цену как строку '129,00'."""
-    return f"{val:.2f}".replace(".", ",")
+# --- Low-level normalizers ----------------------------------------------------
 
 
-_CYR_RE = re.compile(r"[а-яА-ЯёЁ]")
+def _numeric_text(text: str) -> str:
+    """Fix OCR substitutions only inside numeric-looking tokens.
+
+    Applying the translation to an entire line turns Russian words such as
+    ``без`` into ``бе3`` and creates fake prices.  We therefore translate only
+    whitespace-delimited tokens that already contain a digit or numeric symbol.
+    """
+    if not text:
+        return ""
+
+    def repl(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if re.search(r"\d|[.,:%₽]", token):
+            return token.translate(_NUMERIC_OCR_TRANSLATION)
+        return token
+
+    return re.sub(r"\S+", repl, text)
+
+
+def _strip_percent_tokens(text: str) -> str:
+    """Remove discount tokens before price extraction."""
+    return _PCT_TOKEN_RE.sub(" ", _numeric_text(text))
+
+
+def _looks_like_date_or_code(text: str) -> bool:
+    t = _numeric_text(text)
+    return bool(_DATE_RE.search(t) or _CODE_RE.search(t))
+
+
+def _price_from_match(match: re.Match[str]) -> float | None:
+    raw_int = re.sub(r"[\s\u00a0]", "", match.group(1))
+    if len(raw_int) > 6:
+        return None
+    integer = int(raw_int)
+    frac_raw = match.group(2)
+    if frac_raw is None:
+        frac = 0
+    else:
+        frac = int((frac_raw + "0")[:2])
+    val = integer + frac / 100.0
+    if 1.0 <= val <= 99_999.99:
+        return val
+    return None
+
+
+def _fmt_price(val: float, decimal_comma: bool = True) -> str:
+    formatted = f"{val:.2f}"
+    return formatted.replace(".", ",") if decimal_comma else formatted
+
+
+def _normalize_price_string(raw: str, decimal_comma: bool = False) -> str:
+    """Normalize a price-like value from QR/OCR."""
+    prices = _extract_prices([raw])
+    if not prices:
+        return str(raw).strip()
+    return _fmt_price(prices[0], decimal_comma=decimal_comma)
+
+
+# --- Public helper functions used in tests -----------------------------------
+
+
+def _extract_prices(texts: Iterable[str]) -> list[float]:
+    """Extract price-like numbers, excluding percents, dates, codes and long IDs."""
+    prices: list[float] = []
+    for text in texts:
+        if not text:
+            continue
+        if _looks_like_date_or_code(text):
+            continue
+        clean = _strip_percent_tokens(text)
+        for m in _PRICE_RE.finditer(clean):
+            val = _price_from_match(m)
+            if val is None:
+                continue
+            # Do not treat obvious item counts as prices: "2 шт", "1 кг" etc.
+            tail = clean[m.end() : m.end() + 5].lower()
+            if re.match(r"\s*(шт|кг|г|л)\b", tail):
+                continue
+            prices.append(val)
+    return sorted(prices)
+
+
+def _find_discount(texts: Iterable[str]) -> str:
+    """Find discount amount as '-NN%' or '-NNр'."""
+    for text in texts:
+        t = _numeric_text(text)
+        m = _DISCOUNT_PCT_RE.search(t)
+        if m:
+            pct = int(m.group(1))
+            if 1 <= pct <= 99:
+                return f"-{pct}%"
+    for text in texts:
+        t = _numeric_text(text)
+        if "-" not in t and "−" not in t and "скид" not in t.lower():
+            continue
+        m = _DISCOUNT_RUB_RE.search(t)
+        if m:
+            rub = int(m.group(1))
+            if 1 <= rub <= 99_999:
+                return f"-{rub}р"
+    return ABSENT_VALUE
+
+
+# --- Geometry / zone helpers --------------------------------------------------
+
+
+def _find_orange_rows(img: np.ndarray) -> tuple[int, int]:
+    """Find rows with orange/yellow/red price background."""
+    if img is None or img.size == 0:
+        return 0, img.shape[0] if img is not None else 0
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    mask_orange = cv2.inRange(
+        hsv, np.array([5, 45, 70]), np.array([45, 255, 255])
+    )
+    mask_red1 = cv2.inRange(
+        hsv, np.array([0, 45, 70]), np.array([12, 255, 255])
+    )
+    mask_red2 = cv2.inRange(
+        hsv, np.array([160, 45, 70]), np.array([180, 255, 255])
+    )
+    mask = mask_orange | mask_red1 | mask_red2
+    row_sums = mask.sum(axis=1) / 255.0
+    threshold = img.shape[1] * 0.12
+    rows = np.where(row_sums > threshold)[0]
+    if len(rows) == 0:
+        return int(img.shape[0] * 0.55), img.shape[0]
+    return max(0, int(rows[0]) - 10), min(img.shape[0], int(rows[-1]) + 10)
+
+
+def _normalize_box(
+    box: list, w: int, h: int
+) -> tuple[float, float, float, float]:
+    xs = [float(p[0]) for p in box]
+    ys = [float(p[1]) for p in box]
+    return (
+        min(xs) / max(1, w),
+        min(ys) / max(1, h),
+        max(xs) / max(1, w),
+        max(ys) / max(1, h),
+    )
+
+
+def _line_contexts(boxes: list[OCRBox], y_tol: float = 0.045) -> dict[int, str]:
+    """Return text line context for each OCR box index."""
+    indexed = sorted(
+        enumerate(boxes), key=lambda item: (item[1].center_y, item[1].center_x)
+    )
+    groups: list[list[tuple[int, OCRBox]]] = []
+    for idx, box in indexed:
+        if (
+            not groups
+            or abs(box.center_y - _group_center_y(groups[-1])) > y_tol
+        ):
+            groups.append([(idx, box)])
+        else:
+            groups[-1].append((idx, box))
+    contexts: dict[int, str] = {}
+    for group in groups:
+        group.sort(key=lambda item: item[1].center_x)
+        context = " ".join(box.text for _, box in group)
+        for idx, _ in group:
+            contexts[idx] = context
+    return contexts
+
+
+def _group_center_y(group: list[tuple[int, OCRBox]]) -> float:
+    return sum(box.center_y for _, box in group) / max(1, len(group))
+
+
+def _price_context_multiplier(text: str, context: str, value: float) -> float:
+    """Boost/penalize price candidates using nearby OCR words."""
+    ctx = f"{text} {context}".lower().replace("ё", "е")
+    mult = 1.0
+    if re.search(r"₽|\bруб", ctx):
+        mult *= 1.15
+    if re.search(r"по\s+карт|карт[аеуы]", ctx) and not re.search(
+        r"без\s+карт", ctx
+    ):
+        mult *= 1.45
+    if re.search(r"акци|скид|выгод", ctx):
+        mult *= 1.30
+    if re.search(r"без\s+карт|обыч|регуляр|старая", ctx):
+        mult *= 1.25
+    if re.search(r"\bот\s+\d+|опт|шт\.?", ctx) and value <= 10:
+        mult *= 0.25
+    # Unit/count tokens around tiny numbers are usually not prices.
+    if value <= 10 and re.search(r"\b(шт|кг|г|л)\b", ctx):
+        mult *= 0.25
+    return mult
+
+
+def _extract_price_candidates(boxes: list[OCRBox]) -> list[PriceCandidate]:
+    candidates: list[PriceCandidate] = []
+    contexts = _line_contexts(boxes)
+    for idx, b in enumerate(boxes):
+        vals = _extract_prices([b.text])
+        context = contexts.get(idx, b.text)
+        for val in vals:
+            base_score = max(1e-6, b.area) * max(0.05, b.conf)
+            score = base_score * _price_context_multiplier(b.text, context, val)
+            candidates.append(
+                PriceCandidate(
+                    value=val, text=b.text, score=score, box=b, context=context
+                )
+            )
+    candidates.extend(_split_kopeck_candidates(boxes, contexts))
+    return candidates
+
+
+def _digits_token(text: str) -> str:
+    """Return digits for a compact OCR numeric token, or empty for text/IDs."""
+    raw = _numeric_text(text).strip()
+    if not raw or _looks_like_date_or_code(raw) or "%" in raw:
+        return ""
+    if re.search(r"[a-zа-яё]", raw.lower()):
+        # Currency-bearing tokens are handled by regular price extraction.
+        return ""
+    digits = re.sub(r"\D", "", raw)
+    return digits if digits and len(digits) <= 5 else ""
+
+
+def _split_kopeck_candidates(
+    boxes: list[OCRBox], contexts: dict[int, str]
+) -> list[PriceCandidate]:
+    """Recover prices split by OCR into ruble and kopeck boxes (``129`` + ``99``)."""
+    out: list[PriceCandidate] = []
+    for li, left in enumerate(boxes):
+        rub = _digits_token(left.text)
+        if not (2 <= len(rub) <= 5):
+            continue
+        rub_val = int(rub)
+        if rub_val < 10:
+            continue
+        for ri, right in enumerate(boxes):
+            if li == ri:
+                continue
+            cents = _digits_token(right.text)
+            if not (1 <= len(cents) <= 2) or int(cents) > 99:
+                continue
+            if right.center_x <= left.center_x:
+                continue
+            if abs(right.center_y - left.center_y) > 0.075:
+                continue
+            gap = right.x0 - left.x1
+            if gap < -0.03 or gap > 0.16:
+                continue
+            if right.area > left.area * 0.95:
+                continue
+            value = rub_val + int(cents.ljust(2, "0")[:2]) / 100.0
+            if not (1.0 <= value <= 99_999.99):
+                continue
+            context = (
+                f"{contexts.get(li, left.text)} {contexts.get(ri, right.text)}"
+            )
+            text = f"{rub},{cents}"
+            score = (left.area + right.area) * max(left.conf, right.conf, 0.05)
+            score *= 1.35 * _price_context_multiplier(text, context, value)
+            out.append(
+                PriceCandidate(
+                    value=value,
+                    text=text,
+                    score=score,
+                    box=left,
+                    context=context,
+                )
+            )
+    return out
+
+
+def _has_card_signal(c: PriceCandidate) -> bool:
+    ctx = f"{c.text} {c.context}".lower().replace("ё", "е")
+    return bool(
+        re.search(r"по\s+карт|карт[аеуы]|акци|выгод", ctx)
+        and not re.search(r"без\s+карт", ctx)
+    )
+
+
+def _has_default_signal(c: PriceCandidate) -> bool:
+    ctx = f"{c.text} {c.context}".lower().replace("ё", "е")
+    return bool(re.search(r"без\s+карт|обыч|регуляр|старая|цена\s+без", ctx))
+
+
+def _fix_digit_concat(default_val: float, card_val: float) -> float:
+    """Recover OCR digit-concatenation artifact for price_default.
+
+    PaddleOCR sometimes reads two adjacent number boxes as one concatenated
+    token.  E.g. the regular price "2631,57" with a nearby "2" becomes "26312"
+    (≈10× the real value).  When the candidate is >5× card_val but dividing
+    by 10 yields a value in the plausible 1.01–4× range, apply the correction.
+    Only applied when card_val > 0 to avoid division surprises.
+    """
+    if card_val <= 0 or default_val <= card_val * 5:
+        return default_val
+    corrected = default_val / 10.0
+    if card_val * 1.01 <= corrected <= card_val * 4.0:
+        return corrected
+    return default_val
+
+
+def _choose_prices(
+    price_candidates: list[PriceCandidate], all_prices: list[float]
+) -> tuple[str, str]:
+    """Return (price_card, price_default).
+
+    The main signal is still geometry/size, but explicit OCR context ("по карте",
+    "без карты", "акция") wins when present.
+    """
+    if price_candidates:
+        ordered_by_score = sorted(
+            price_candidates, key=lambda c: c.score, reverse=True
+        )
+        values = sorted({round(c.value, 2) for c in price_candidates})
+
+        card_signal = sorted(
+            [c for c in price_candidates if _has_card_signal(c)],
+            key=lambda c: c.score,
+            reverse=True,
+        )
+        default_signal = sorted(
+            [c for c in price_candidates if _has_default_signal(c)],
+            key=lambda c: c.score,
+            reverse=True,
+        )
+        if card_signal:
+            card_val = card_signal[0].value
+            if default_signal:
+                default_val = default_signal[0].value
+            else:
+                higher = [v for v in values if v > card_val + 0.009]
+                default_val = (
+                    max(higher)
+                    if higher
+                    else (max(values) if len(values) > 1 else card_val)
+                )
+            return _fmt_price(card_val), (
+                _fmt_price(default_val)
+                if abs(default_val - card_val) > 0.009
+                else ""
+            )
+
+        if default_signal and len(values) >= 2:
+            default_val = default_signal[0].value
+            lower = [v for v in values if v < default_val - 0.009]
+            card_val = min(lower) if lower else min(values)
+            return _fmt_price(card_val), _fmt_price(default_val)
+
+        if len(values) >= 2:
+            # If one candidate is much larger on the image, it is usually the
+            # card/action price.  Do not duplicate it into price_default when
+            # smaller values are just split ruble/kopeck components.
+            top_candidate_is_price = (
+                len(ordered_by_score) > 1
+                and ordered_by_score[0].score > ordered_by_score[1].score * 1.35
+            )
+            if top_candidate_is_price:
+                card_val = ordered_by_score[0].value
+                default_candidates = [v for v in values if v > card_val + 0.009]
+                if default_candidates:
+                    raw_default = max(default_candidates)
+                    raw_default = _fix_digit_concat(raw_default, card_val)
+                    return _fmt_price(card_val), _fmt_price(raw_default)
+                return _fmt_price(card_val), ""
+            card_val = min(values)
+            default_candidates = [v for v in values if v > card_val + 0.009]
+            default_val = (
+                max(default_candidates) if default_candidates else max(values)
+            )
+            default_val = _fix_digit_concat(default_val, card_val)
+            return _fmt_price(card_val), _fmt_price(default_val)
+        return _fmt_price(ordered_by_score[0].value), ""
+
+    if not all_prices:
+        return "", ""
+    values = sorted({round(v, 2) for v in all_prices})
+    if len(values) >= 2:
+        return _fmt_price(values[0]), _fmt_price(values[-1])
+    return _fmt_price(values[0]), ""
+
+
+# --- Field extractors ---------------------------------------------------------
 
 
 def _preprocess_name_zone(crop_raw: np.ndarray, scale: int = 3) -> np.ndarray:
-    """Light preprocessing for Russian product-name OCR.
-
-    Rotates 90°CCW (same orientation as the main pipeline) and applies
-    a gentle upscale — no CLAHE or sharpening to avoid OCR artifacts.
-    """
     img = cv2.rotate(crop_raw, cv2.ROTATE_90_COUNTERCLOCKWISE)
     if scale > 1:
         h, w = img.shape[:2]
-        img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_LANCZOS4)
+        img = cv2.resize(
+            img, (w * scale, h * scale), interpolation=cv2.INTER_LANCZOS4
+        )
     return img
 
 
-def _extract_name_ru(
-    crop_raw: np.ndarray, ocr_ru: "OCREngine", name_end_frac: float
-) -> str:
-    """Russian OCR on the white/name zone using the original (raw) crop.
+def _sanitize_name_fragment(text: str) -> str:
+    """Remove service numbers/prices from a possible product-name fragment."""
+    part = str(text or "").replace("\u00a0", " ")
+    part = _NAME_DATE_RE.sub(" ", part)
+    part = _NAME_LONG_DIGITS_RE.sub(" ", part)
+    part = _NAME_PRICE_RE.sub(" ", part)
+    part = re.sub(
+        r"\b(?:qr|ean|barcode|штрих\s*код|артикул|id[_\s-]*sku)\b",
+        " ",
+        part,
+        flags=re.IGNORECASE,
+    )
+    part = re.sub(r"\s+", " ", part).strip(" -|•\t\n")
+    if len(part) < 2:
+        return ""
+    letters = len(re.findall(r"[a-zа-яё]", part.lower()))
+    digits = len(re.findall(r"\d", part))
+    if letters < 2:
+        return ""
+    if digits > max(6, letters * 2):
+        return ""
+    if _STANDALONE_NUMERIC_RE.fullmatch(part):
+        return ""
+    return part
 
-    Uses gentle preprocessing (rotate + 3× upscale, no CLAHE/sharpening)
-    to avoid OCR artifacts from aggressive processing.
-    name_end_frac is the orange zone start fraction (from processed crop).
-    """
+
+def _clean_product_name(text: str) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip(" -|•\t\n")
+    parts: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"\s{2,}|\|", text):
+        part = _sanitize_name_fragment(part)
+        if not part:
+            continue
+        key = re.sub(r"\s+", " ", part.lower())
+        if key not in seen:
+            seen.add(key)
+            parts.append(part)
+    cleaned = " ".join(parts).strip()
+    return cleaned[:300]
+
+
+def _extract_name_ru(
+    crop_raw: np.ndarray, ocr_ru: OCREngine, name_end_frac: float
+) -> str:
     proc = _preprocess_name_zone(crop_raw)
     H = proc.shape[0]
-    safe_frac = max(0.35, min(name_end_frac, 0.72))
+    safe_frac = max(0.30, min(name_end_frac, 0.75))
     zone_h = int(H * safe_frac)
     zone = proc[:zone_h, :]
     if zone.size == 0 or zone.shape[0] < 10:
         return ""
     lines = ocr_ru.run(zone)
-    scored: list[tuple[float, str]] = []
+    scored: list[tuple[float, float, str]] = []
     for box_pts, text, conf in lines:
         text = text.strip()
-        if conf < 0.25 or len(text) < 2:
+        if conf < 0.23 or len(text) < 2:
             continue
         if not (_CYR_RE.search(text) or len(text) > 5):
             continue
+        if not _sanitize_name_fragment(text):
+            continue
         xs = [p[0] for p in box_pts]
         ys = [p[1] for p in box_pts]
-        area = (max(xs) - min(xs)) * (max(ys) - min(ys))
-        scored.append((area * conf, text))
+        area = max(1.0, (max(xs) - min(xs)) * (max(ys) - min(ys)))
+        scored.append((min(1.0, min(ys) / max(1, H)), area * conf, text))
     if not scored:
         return ""
-    scored.sort(reverse=True)
-    return " ".join(t for _, t in scored[:6])[:300]
+    # Preserve reading order: top-to-bottom, then keep reasonably high-scored fragments.
+    scored.sort(key=lambda x: (x[0], -x[1]))
+    selected = [t for _, _, t in scored[:8]]
+    return _clean_product_name(" ".join(selected))
+
+
+def _extract_barcode(
+    texts: Iterable[str], proc_crop: np.ndarray | None = None
+) -> str:
+    if proc_crop is not None and proc_crop.size > 0:
+        decoded = read_barcode_from_strip(proc_crop)
+        if decoded:
+            return decoded
+
+    # Text OCR: accept only validated 13-digit EANs or 14-digit strings where dropping
+    # one digit validates. Do not append a checksum to arbitrary 12-digit SKU values.
+    for text in texts:
+        t = _numeric_text(text)
+        for m in _BARCODE_DIGITS_RE.finditer(t):
+            digits = re.sub(r"\D", "", m.group(1))
+            if len(digits) == 13 and ean13_checksum_valid(digits):
+                return digits
+            if len(digits) == 14:
+                repaired = ean13_repair(digits)
+                if repaired:
+                    return repaired
+    return ""
+
+
+def _extract_sku(texts: Iterable[str], barcode: str = "") -> str:
+    """Extract strict Lenta SKU: 12 digits starting with 2.
+
+    A 12-digit SKU must never be upgraded to a barcode.  Shorter internal IDs
+    are intentionally left empty because they are not part of the required
+    ``id_sku`` contract used in the provided GT.
+    """
+    barcode_digits = re.sub(r"\D", "", str(barcode or ""))
+    for text in texts:
+        t = _numeric_text(text)
+        for m in _SKU_RE.finditer(t):
+            sku = normalize_sku(m.group(1))
+            if sku and sku != barcode_digits and sku not in barcode_digits:
+                return sku
+    return ""
+
+
+def _extract_datetime(texts: Iterable[str]) -> str:
+    combined = " ".join(_numeric_text(t) for t in texts)
+    m = _DATE_RE.search(combined)
+    if not m:
+        return ""
+    day, month, year, hour, minute = m.groups()
+    if len(year) == 2:
+        year = "20" + year
+    try:
+        dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
+        # Match GT style: one/two digit hour allowed, no leading zero required.
+        return (
+            f"{dt.day:02d}.{dt.month:02d}.{dt.year} {dt.hour}:{dt.minute:02d}"
+        )
+    except ValueError:
+        return m.group(0)
+
+
+def _extract_code(texts: Iterable[str]) -> str:
+    for text in texts:
+        m = _CODE_RE.search(_numeric_text(text))
+        if m:
+            return re.sub(r"\s+", "", m.group(0)).replace("–", "-")
+    return ABSENT_VALUE
+
+
+def _extract_special_symbol(boxes: list[OCRBox]) -> str:
+    # Only trust isolated short boxes; do not take letters from product names.
+    for b in boxes:
+        if b.conf < 0.35 or len(b.text.strip()) > 2:
+            continue
+        m = _SPECIAL_RE.match(b.text)
+        if m:
+            s = m.group(1).upper().replace("K", "К").replace("L", "Л")
+            return s
+    return ABSENT_VALUE
+
+
+def _box_text_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _extract_additional_info(
+    boxes: list[OCRBox], used_values: set[str], product_name: str
+) -> str:
+    extras: list[str] = []
+    for b in boxes:
+        text = b.text.strip()
+        if len(text) < 5 or b.conf < 0.45:
+            continue
+        digits = re.sub(r"\D", "", text)
+        if text in used_values or digits in used_values:
+            continue
+        if product_name and _box_text_similarity(text, product_name) > 0.65:
+            continue
+        if not _sanitize_name_fragment(text):
+            continue
+        extras.append(text)
+    return " | ".join(extras[:3]) if extras else ABSENT_VALUE
+
+
+# --- Main parser --------------------------------------------------------------
 
 
 def parse_ocr_result(
@@ -184,28 +690,29 @@ def parse_ocr_result(
     frame_timestamp: float = 0.0,
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0),
     color: str = "red",
-    ocr_ru: "OCREngine | None" = None,
-    crop_raw: "np.ndarray | None" = None,
+    ocr_ru: OCREngine | None = None,
+    crop_raw: np.ndarray | None = None,
 ) -> PriceTag:
-    """Извлечь поля ценника из OCR-результатов.
-
-    crop     — препроцессированный (90°CCW + upscale) кроп, для orange zone.
-    crop_raw — исходный (не обработанный) кроп, для Russian OCR product_name.
-    ocr_ru   — опциональный RU-движок для извлечения product_name.
-    """
+    """Extract price-tag fields from OCR results."""
     x_min, y_min, x_max, y_max = bbox
     crop_h = max(1, y_max - y_min)
     crop_w = max(1, x_max - x_min)
 
-    # --- Боксы ---
     boxes: list[OCRBox] = []
     for raw_box, text, conf in ocr_lines:
-        if not text.strip() or conf < 0.3:
+        text = (text or "").strip()
+        if not text or conf < 0.25:
             continue
         h_img = crop.shape[0] if crop is not None else crop_h
         w_img = crop.shape[1] if crop is not None else crop_w
         x0, y0, x1, y1 = _normalize_box(raw_box, w_img, h_img)
-        boxes.append(OCRBox(text=text.strip(), conf=conf, x0=x0, y0=y0, x1=x1, y1=y1))
+        boxes.append(
+            OCRBox(text=text, conf=float(conf), x0=x0, y0=y0, x1=x1, y1=y1)
+        )
+
+    # Even when OCR returns no boxes, pyzbar may still read the barcode from crop.
+    all_texts = [b.text for b in boxes]
+    barcode = _extract_barcode(all_texts, crop)
 
     if not boxes:
         return PriceTag(
@@ -216,165 +723,52 @@ def parse_ocr_result(
             x_max=x_max,
             y_max=y_max,
             color=color,
+            barcode=barcode,
         )
 
-    boxes.sort(key=lambda b: b.center_y)
+    boxes.sort(key=lambda b: (b.center_y, b.center_x))
     all_texts = [b.text for b in boxes]
 
-    # --- Зоны ---
     price_zone_start = 0.5
     if crop is not None:
-        oy0, oy1 = _find_orange_rows(crop)
+        oy0, _ = _find_orange_rows(crop)
         price_zone_start = oy0 / max(1, crop.shape[0])
 
     price_boxes = [b for b in boxes if b.center_y >= price_zone_start]
     info_boxes = [b for b in boxes if b.center_y < price_zone_start]
 
-    # --- 1. Скидка (сначала! чтобы исключить % из ценового парсинга) ---
     discount_amount = _find_discount(all_texts)
 
-    # --- 2. Цены ---
-    # Ищем в ценовой зоне сначала, потом во всём тексте
-    price_texts = [b.text for b in price_boxes]
-    prices_orange = _extract_prices(price_texts)
-    prices_all = _extract_prices(all_texts)
+    price_candidates = _extract_price_candidates(price_boxes)
+    all_prices = _extract_prices(all_texts)
+    price_card, price_default = _choose_prices(price_candidates, all_prices)
 
-    price_card = ""
-    price_default = ""
-
-    # Оранжевая зона содержит price_card (крупно) и обычно price_default (мелко)
-    # После фильтрации %: ожидаем числа типа [129, 252]
-    if len(prices_orange) >= 2:
-        # Меньшая = card (акционная), большая = default (без карты)
-        price_card = _fmt_price(prices_orange[0])
-        price_default = _fmt_price(prices_orange[-1])
-    elif len(prices_orange) == 1:
-        price_card = _fmt_price(prices_orange[0])
-        # Ищем default в белой зоне (там он может быть тоже)
-        prices_info = _extract_prices([b.text for b in info_boxes])
-        if prices_info:
-            candidate = max(prices_info)
-            if candidate > prices_orange[0]:
-                price_default = _fmt_price(candidate)
-    elif len(prices_all) >= 1:
-        # Фоллбек: берём из всего текста
-        price_card = _fmt_price(prices_all[0])
-        if len(prices_all) >= 2:
-            price_default = _fmt_price(prices_all[-1])
-
-    # --- 3. Название продукта ---
     product_name = ""
-    # Приоритет: Russian OCR на raw-кропе (gentle preprocessing)
     if ocr_ru is not None and crop_raw is not None:
         product_name = _extract_name_ru(crop_raw, ocr_ru, price_zone_start)
     elif ocr_ru is not None and crop is not None:
-        # Фоллбек: processed crop (хуже качество для RU OCR)
         product_name = _extract_name_ru(crop, ocr_ru, price_zone_start)
-    # Фоллбек: EN-боксы из белой зоны (числа, коды и тп отсеиваются)
+
     if not product_name and info_boxes:
-        name_candidates = [b for b in info_boxes if len(b.text) > 3 and b.conf > 0.5]
-        if name_candidates:
-            product_name = " ".join(b.text for b in name_candidates[:4])
+        name_candidates = [
+            b.text
+            for b in info_boxes
+            if len(b.text) > 3
+            and b.conf > 0.45
+            and _sanitize_name_fragment(b.text)
+        ]
+        product_name = _clean_product_name(" ".join(name_candidates[:6]))
 
-    # --- 4. Штрихкод ---
-    barcode = ""
-    for text in all_texts:
-        m = _BARCODE_RE.search(text)
-        if m and len(m.group(0)) >= 10:
-            cand = m.group(0)
-            barcode = ean13_repair(cand) or cand
-            break
-
-    # Fallback A: длинные цифровые последовательности из OCR + EAN-13 repair
     if not barcode:
-        for text in all_texts:
-            digits = re.sub(r"\D", "", text)
-            if 11 <= len(digits) <= 15:
-                repaired = ean13_repair(digits)
-                if repaired:
-                    barcode = repaired
-                    break
+        barcode = _extract_barcode(all_texts, crop)
 
-    # Fallback C: пространственная склейка цифровых боксов
-    # Штрихкод часто бьётся OCR на 2-4 фрагмента ("4607" "124143" "901")
-    if not barcode:
-        digit_boxes = [b for b in boxes if re.fullmatch(r"\d+", b.text)]
-        # Группируем по горизонтальной полосе (±3% высоты)
-        row_tol = 0.03
-        rows: list[list[OCRBox]] = []
-        for db in sorted(digit_boxes, key=lambda b: b.center_y):
-            placed = False
-            for row in rows:
-                if abs(db.center_y - row[0].center_y) < row_tol:
-                    row.append(db)
-                    placed = True
-                    break
-            if not placed:
-                rows.append([db])
-        for row in rows:
-            row.sort(key=lambda b: b.x0)
-            concat = "".join(b.text for b in row)
-            if 11 <= len(concat) <= 15:
-                repaired = ean13_repair(concat)
-                if repaired:
-                    barcode = repaired
-                    break
-            # Попробуем sliding window по частям строки
-            for start in range(len(concat)):
-                for end in range(start + 11, min(start + 16, len(concat) + 1)):
-                    chunk = concat[start:end]
-                    if 11 <= len(chunk) <= 15:
-                        repaired = ean13_repair(chunk)
-                        if repaired:
-                            barcode = repaired
-                            break
-                if barcode:
-                    break
-            if barcode:
-                break
+    id_sku = _extract_sku(all_texts, barcode)
+    print_datetime = _extract_datetime(all_texts)
+    code = _extract_code(all_texts)
+    special_symbols = _extract_special_symbol(boxes)
 
-    # Fallback D: ROI-таргетинг штрихкода через Sobel + pyzbar
-    if not barcode and crop is not None:
-        barcode = read_barcode_from_strip(crop)
-
-    # --- 5. Артикул ---
-    id_sku = ""
-    for text in all_texts:
-        m = _SKU_RE.search(text)
-        if m:
-            candidate = m.group(0)
-            if candidate != barcode and candidate not in barcode:
-                id_sku = candidate
-                break
-
-    # --- 6. Дата ---
-    print_datetime = ""
-    for text in all_texts:
-        m = _DATE_RE.search(text)
-        if m:
-            print_datetime = m.group(0)
-            break
-
-    # --- 7. Код зоны ---
-    code = "нет"
-    for text in all_texts:
-        m = _CODE_RE.search(text)
-        if m:
-            code = m.group(0)
-            break
-
-    # --- 8. Специальные символы ---
-    special_symbols = "нет"
-    for text in all_texts:
-        m = _SPECIAL_RE.search(text)
-        if m:
-            special_symbols = m.group(1).upper()
-            break
-
-    # --- 9. additional_info ---
-    used = {barcode, id_sku, print_datetime}
-    extra = [b.text for b in boxes if b.text not in used and len(b.text) > 5 and b.conf > 0.5]
-    additional_info = " | ".join(extra[:2]) if extra else "нет"
+    used = {barcode, id_sku, print_datetime, price_card, price_default}
+    additional_info = _extract_additional_info(boxes, used, product_name)
 
     return PriceTag(
         filename=filename,
@@ -386,7 +780,7 @@ def parse_ocr_result(
         product_name=product_name,
         price_default=price_default,
         price_card=price_card,
-        price_discount="нет",
+        price_discount=ABSENT_VALUE,
         barcode=barcode,
         discount_amount=discount_amount,
         id_sku=id_sku,

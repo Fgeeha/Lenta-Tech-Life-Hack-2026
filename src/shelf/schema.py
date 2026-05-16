@@ -1,8 +1,16 @@
-"""Единый источник правды для схемы выходного CSV."""
+"""Единый источник правды для схемы выходного CSV.
+
+Семантика значений по ТЗ:
+- ``"нет"`` — параметра нет на конкретном типе ценника;
+- ``""`` — параметр есть, но не распознан.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-# Порядок столбцов строго по ТЗ §2
+# Порядок столбцов строго по ТЗ.
 OUTPUT_COLUMNS: list[str] = [
     # --- поля с ценника ---
     "filename",
@@ -37,10 +45,15 @@ OUTPUT_COLUMNS: list[str] = [
     "action_code_qr",
 ]
 
-# «нет» — поле отсутствует на этом типе ценника
-# ""     — поле есть, но не распозналось
-_ABSENT = "нет"
-_UNREAD = ""
+ABSENT_VALUE = "нет"
+UNREAD_VALUE = ""
+
+# Историческая опечатка встречается в приложенных разметках. В выходе всегда пишем правильное имя.
+COLUMN_ALIASES: dict[str, str] = {
+    "wholesale_level_1_coun": "wholesale_level_1_count",
+}
+
+_NUMERIC_COLUMNS = {"frame_timestamp", "x_min", "y_min", "x_max", "y_max"}
 
 
 @dataclass
@@ -48,41 +61,86 @@ class PriceTag:
     """Одна строка выходного CSV."""
 
     # --- из видео ---
-    filename: str = _UNREAD
-    frame_timestamp: float = 0.0
+    filename: str = UNREAD_VALUE
+    frame_timestamp: float = 0.0  # миллисекунды от начала видео
     x_min: int = 0
     y_min: int = 0
     x_max: int = 0
     y_max: int = 0
 
     # --- с ценника (текст) ---
-    product_name: str = _UNREAD
-    price_default: str = _UNREAD
-    price_card: str = _UNREAD
-    price_discount: str = _ABSENT
-    barcode: str = _UNREAD
-    discount_amount: str = _ABSENT
-    id_sku: str = _UNREAD
-    print_datetime: str = _UNREAD
-    code: str = _UNREAD
-    additional_info: str = _ABSENT
-    color: str = _UNREAD
-    special_symbols: str = _ABSENT
+    product_name: str = UNREAD_VALUE
+    price_default: str = UNREAD_VALUE
+    price_card: str = UNREAD_VALUE
+    price_discount: str = ABSENT_VALUE
+    barcode: str = UNREAD_VALUE
+    discount_amount: str = ABSENT_VALUE
+    id_sku: str = UNREAD_VALUE
+    print_datetime: str = UNREAD_VALUE
+    code: str = ABSENT_VALUE
+    additional_info: str = ABSENT_VALUE
+    color: str = UNREAD_VALUE
+    special_symbols: str = ABSENT_VALUE
 
     # --- из QR ---
-    qr_code_barcode: str = _ABSENT
-    price1_qr: str = _ABSENT
-    price2_qr: str = _ABSENT
-    price3_qr: str = _ABSENT
-    price4_qr: str = _ABSENT
-    wholesale_level_1_count: str = _ABSENT
-    wholesale_level_1_price: str = _ABSENT
-    wholesale_level_2_count: str = _ABSENT
-    wholesale_level_2_price: str = _ABSENT
-    action_price_qr: str = _ABSENT
-    action_code_qr: str = _ABSENT
+    qr_code_barcode: str = ABSENT_VALUE
+    price1_qr: str = ABSENT_VALUE
+    price2_qr: str = ABSENT_VALUE
+    price3_qr: str = ABSENT_VALUE
+    price4_qr: str = ABSENT_VALUE
+    wholesale_level_1_count: str = ABSENT_VALUE
+    wholesale_level_1_price: str = ABSENT_VALUE
+    wholesale_level_2_count: str = ABSENT_VALUE
+    wholesale_level_2_price: str = ABSENT_VALUE
+    action_price_qr: str = ABSENT_VALUE
+    action_code_qr: str = ABSENT_VALUE
 
-    def to_dict(self) -> dict:
-        """Вернуть строку CSV в порядке OUTPUT_COLUMNS."""
+    def to_dict(self) -> dict[str, Any]:
+        """Вернуть строку CSV в порядке ``OUTPUT_COLUMNS`` без NaN/None."""
         raw = self.__dict__
-        return {col: raw[col] for col in OUTPUT_COLUMNS}
+        return {
+            col: _clean_value(raw.get(col, UNREAD_VALUE), col)
+            for col in OUTPUT_COLUMNS
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PriceTag":
+        """Создать PriceTag из произвольного словаря, учитывая алиасы колонок."""
+        normalized: dict[str, Any] = {}
+        for key, value in data.items():
+            normalized[COLUMN_ALIASES.get(key, key)] = value
+        kwargs = {
+            col: _clean_value(normalized[col], col)
+            for col in OUTPUT_COLUMNS
+            if col in normalized
+        }
+        return cls(**kwargs)
+
+
+def _clean_value(value: Any, column: str | None = None) -> Any:
+    """Привести значение к безопасному для CSV виду.
+
+    pandas часто превращает пустые ячейки в NaN/None; в итоговом CSV это должно быть
+    пустой строкой, а не текстом ``nan``.
+    """
+    if value is None:
+        return UNREAD_VALUE
+    try:
+        # float('nan') != float('nan')
+        if value != value:  # noqa: PLR0124 - быстрый NaN-check без pandas
+            return UNREAD_VALUE
+    except Exception:
+        pass
+    if column in _NUMERIC_COLUMNS:
+        return value
+    return str(value).strip()
+
+
+def validate_columns(columns: list[str]) -> None:
+    """Проверить, что порядок колонок ровно соответствует ТЗ."""
+    if columns != OUTPUT_COLUMNS:
+        missing = [c for c in OUTPUT_COLUMNS if c not in columns]
+        extra = [c for c in columns if c not in OUTPUT_COLUMNS]
+        raise ValueError(
+            f"Некорректная CSV-схема. Missing={missing}, extra={extra}"
+        )

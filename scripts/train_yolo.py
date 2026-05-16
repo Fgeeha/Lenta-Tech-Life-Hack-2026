@@ -27,7 +27,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if not DATASET_YAML.exists():
-        logger.error("dataset.yaml не найден. Запусти сначала: scripts/extract_pseudolabels.py")
+        logger.error(
+            "dataset.yaml не найден. Запусти сначала: scripts/extract_pseudolabels.py"
+        )
         return
 
     MODELS_DIR.mkdir(exist_ok=True)
@@ -35,9 +37,16 @@ def main() -> None:
     from ultralytics import YOLO
 
     model = YOLO(args.model)
-    logger.info("Начало обучения: %s  epochs=%d  batch=%d  imgsz=%d", args.model, args.epochs, args.batch, args.imgsz)
+    logger.info(
+        "Начало обучения: %s  epochs=%d  batch=%d  imgsz=%d",
+        args.model,
+        args.epochs,
+        args.batch,
+        args.imgsz,
+    )
 
-    results = model.train(
+    # results = model.train(
+    model.train(
         data=str(DATASET_YAML.resolve()),
         epochs=args.epochs,
         imgsz=args.imgsz,
@@ -79,7 +88,11 @@ def main() -> None:
         map50_95 = float(metrics.box.map)
         logger.info("Val mAP50=%.3f  mAP50-95=%.3f", map50, map50_95)
 
-        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         today = date.today().isoformat()
         with open("docs/METRICS.md", "a") as f:
             f.write(

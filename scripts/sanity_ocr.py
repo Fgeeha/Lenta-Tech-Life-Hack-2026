@@ -33,7 +33,9 @@ def main() -> None:
 
     crops: list[tuple[float, cv2.Mat, tuple]] = []
 
-    for ts, frame in sample_frames("Данные/43_15/43_15.mp4", interval_ms=500, adaptive=False):
+    for ts, frame in sample_frames(
+        "Данные/43_15/43_15.mp4", interval_ms=500, adaptive=False
+    ):
         h, w = frame.shape[:2]
         scale = min(1.0, 1280 / max(w, h))
         small = cv2.resize(frame, (int(w * scale), int(h * scale)))
@@ -52,8 +54,19 @@ def main() -> None:
     price_hits = 0
     for i, (ts, crop, bbox) in enumerate(sample):
         h, w = crop.shape[:2]
-        proc = preprocess_crop(crop, rotate_180=True, deskew=True, upscale=3, sharpen=True, clahe=True)
-        cv2.imwrite(str(out_dir / f"crop_{i:02d}_{ts:.1f}s.jpg"), proc, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        proc = preprocess_crop(
+            crop,
+            rotate_180=True,
+            deskew=True,
+            upscale=3,
+            sharpen=True,
+            clahe=True,
+        )
+        cv2.imwrite(
+            str(out_dir / f"crop_{i:02d}_{ts:.1f}s.jpg"),
+            proc,
+            [cv2.IMWRITE_JPEG_QUALITY, 92],
+        )
 
         lines = ocr.run(proc)
         texts = [t for _, t, c in lines if c > 0.5]
@@ -66,7 +79,9 @@ def main() -> None:
         print(f"[{i:02d}] ts={ts:.1f}s  bbox={bbox}  crop={w}×{h}")
         print(f"     OCR: {' | '.join(texts[:5]) or '—'}")
 
-    print(f"\n=== OCR читает {ocr_hits}/{len(sample)} ({ocr_hits/max(1,len(sample))*100:.0f}%) кропов")
+    print(
+        f"\n=== OCR читает {ocr_hits}/{len(sample)} ({ocr_hits/max(1,len(sample))*100:.0f}%) кропов"
+    )
     print(f"=== Цены/числа: {price_hits}/{len(sample)} кропов")
     print(f"=== Кропы сохранены: {out_dir}")
 

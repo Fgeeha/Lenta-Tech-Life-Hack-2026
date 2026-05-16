@@ -15,11 +15,24 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Извлечь кадры из видео")
-    parser.add_argument("video", nargs="?", default="Данные/43_15/43_15.mp4", help="Путь к видео")
-    parser.add_argument("--out", default="/tmp/shelf_frames", help="Папка для кадров")
-    parser.add_argument("--interval", type=int, default=500, help="Интервал в мс")
+    parser.add_argument(
+        "video",
+        nargs="?",
+        default="Данные/43_15/43_15.mp4",
+        help="Путь к видео",
+    )
+    parser.add_argument(
+        "--out", default="/tmp/shelf_frames", help="Папка для кадров"
+    )
+    parser.add_argument(
+        "--interval", type=int, default=500, help="Интервал в мс"
+    )
     parser.add_argument("--n", type=int, default=20, help="Макс. кадров")
-    parser.add_argument("--adaptive", action="store_true", help="Адаптивный семплинг (пропуск стоячих кадров)")
+    parser.add_argument(
+        "--adaptive",
+        action="store_true",
+        help="Адаптивный семплинг (пропуск стоячих кадров)",
+    )
     args = parser.parse_args()
 
     video = Path(args.video)
@@ -33,7 +46,9 @@ def main() -> None:
         saved = []
         import cv2
 
-        for ts, frame in sample_frames(video, interval_ms=args.interval, adaptive=True):
+        for ts, frame in sample_frames(
+            video, interval_ms=args.interval, adaptive=True
+        ):
             if len(saved) >= args.n:
                 break
             h, w = frame.shape[:2]
@@ -45,7 +60,9 @@ def main() -> None:
             saved.append(dest)
         print(f"Адаптивно сохранено {len(saved)} кадров в {out_dir}")
     else:
-        saved = save_debug_frames(video, args.out, interval_ms=args.interval, max_frames=args.n)
+        saved = save_debug_frames(
+            video, args.out, interval_ms=args.interval, max_frames=args.n
+        )
         print(f"Сохранено {len(saved)} кадров в {args.out}")
 
     for p in saved:

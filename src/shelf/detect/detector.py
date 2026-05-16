@@ -1,11 +1,12 @@
-"""Детектор ценников.
+"""Price-tag detectors.
 
-Используем MSER (Maximally Stable Extremal Regions) — специализирован для
-нахождения стабильных прямоугольных регионов (текст, напечатанные материалы).
-Даёт recall ~50% без обучения; с трекером (этап 4) recall возрастает.
-
-YOLODetector — резерв для псевдо-лейблов (этап 12).
+Default production mode is ``hybrid``: use a trained tiled YOLO detector when
+weights are available, then add MSER proposals as a recall-oriented fallback.
+This is safer than falling back to generic COCO ``yolov8n.pt``, which does not
+know the ``price_tag`` class.
 """
+
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
@@ -15,12 +16,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_ASPECT_MIN = 0.2
-_ASPECT_MAX = 2.0
-_MIN_AREA_ORIG = 6_000  # px² в оригинальных координатах
-_MAX_AREA_ORIG = 150_000
-_MIN_W = 40  # px в оригинале
-_MIN_H = 80  # px в оригинале
+_ASPECT_MIN = 0.18
+_ASPECT_MAX = 2.4
+_MIN_AREA_ORIG = 5_000  # px² в оригинальных координатах
+_MAX_AREA_ORIG = 260_000
+_MIN_W = 35
+_MIN_H = 50
 
 
 @dataclass
@@ -30,7 +31,7 @@ class Detection:
     x_max: int
     y_max: int
     confidence: float
-    cls_name: str = ""
+    cls_name: str = "tag"
 
     @property
     def area(self) -> int:
@@ -41,39 +42,86 @@ class Detection:
         h = self.y_max - self.y_min
         return (self.x_max - self.x_min) / h if h > 0 else 0.0
 
+    @property
+    def center(self) -> tuple[float, float]:
+        return (
+            (self.x_min + self.x_max) / 2.0,
+            (self.y_min + self.y_max) / 2.0,
+        )
 
-def _nms(dets: list["Detection"], iou_thr: float = 0.35) -> list["Detection"]:
+    def clipped(self, width: int, height: int) -> "Detection":
+        return Detection(
+            x_min=max(0, min(width - 1, int(self.x_min))),
+            y_min=max(0, min(height - 1, int(self.y_min))),
+            x_max=max(0, min(width, int(self.x_max))),
+            y_max=max(0, min(height, int(self.y_max))),
+            confidence=float(self.confidence),
+            cls_name=self.cls_name,
+        )
+
+
+def _iou(a: Detection, b: Detection) -> float:
+    ix = max(0, min(a.x_max, b.x_max) - max(a.x_min, b.x_min))
+    iy = max(0, min(a.y_max, b.y_max) - max(a.y_min, b.y_min))
+    inter = ix * iy
+    union = a.area + b.area - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer env override for lightweight local runs."""
+    import os
+
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %d", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
+def _nms(dets: list[Detection], iou_thr: float = 0.35) -> list[Detection]:
     if not dets:
         return []
     dets = sorted(dets, key=lambda d: d.confidence, reverse=True)
-    keep: list["Detection"] = []
+    keep: list[Detection] = []
     for d in dets:
-        dominated = False
-        for k in keep:
-            ix = max(0, min(d.x_max, k.x_max) - max(d.x_min, k.x_min))
-            iy = max(0, min(d.y_max, k.y_max) - max(d.y_min, k.y_min))
-            inter = ix * iy
-            union = d.area + k.area - inter
-            if union > 0 and inter / union > iou_thr:
-                dominated = True
-                break
-        if not dominated:
-            keep.append(d)
+        if d.area <= 0:
+            continue
+        if any(_iou(d, k) > iou_thr for k in keep):
+            continue
+        keep.append(d)
     return keep
 
 
+def _valid_tag_geometry(det: Detection) -> bool:
+    return (
+        _MIN_AREA_ORIG <= det.area <= _MAX_AREA_ORIG
+        and _ASPECT_MIN <= det.aspect <= _ASPECT_MAX
+        and (det.x_max - det.x_min) >= _MIN_W
+        and (det.y_max - det.y_min) >= _MIN_H
+    )
+
+
 class MSERDetector:
-    """MSER-детектор: находит стабильные прямоугольные регионы (ценники, этикетки)."""
+    """MSER detector: no training needed, useful as fallback/high-recall proposals."""
 
     def __init__(
         self,
-        process_width: int = 1280,
+        process_width: int | None = None,
         delta: int = 5,
-        min_area_scaled: int = 800,
-        max_area_scaled: int = 10_000,
-        max_variation: float = 0.25,
+        min_area_scaled: int = 650,
+        max_area_scaled: int = 18_000,
+        max_variation: float = 0.35,
     ):
-        self.process_width = process_width
+        self.process_width = (
+            process_width
+            if process_width is not None
+            else _env_int("SHELF_MSER_PROCESS_WIDTH", 1440)
+        )
         self._mser = cv2.MSER_create(
             delta=delta,
             min_area=min_area_scaled,
@@ -84,9 +132,15 @@ class MSERDetector:
     def detect(self, frame: np.ndarray) -> list[Detection]:
         h, w = frame.shape[:2]
         scale = min(1.0, self.process_width / max(w, h))
-        small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1.0 else frame
+        small = (
+            cv2.resize(frame, (int(w * scale), int(h * scale)))
+            if scale < 1.0
+            else frame
+        )
 
+        # MSER is sensitive to glare; CLAHE on grayscale improves region stability.
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
         _, bboxes = self._mser.detectRegions(gray)
 
         dets: list[Detection] = []
@@ -95,39 +149,45 @@ class MSERDetector:
             orig_y = int(y / scale)
             orig_w = int(bw / scale)
             orig_h = int(bh / scale)
-            orig_area = orig_w * orig_h
-            ar = orig_w / orig_h if orig_h > 0 else 0.0
-
-            if not (_ASPECT_MIN <= ar <= _ASPECT_MAX):
-                continue
-            if orig_area < _MIN_AREA_ORIG or orig_area > _MAX_AREA_ORIG:
-                continue
-            if orig_w < _MIN_W or orig_h < _MIN_H:
-                continue
-
-            score = min(1.0, orig_area / 60_000)
-            dets.append(
-                Detection(
-                    x_min=orig_x,
-                    y_min=orig_y,
-                    x_max=orig_x + orig_w,
-                    y_max=orig_y + orig_h,
-                    confidence=score,
-                    cls_name="tag",
-                )
+            det = Detection(
+                orig_x,
+                orig_y,
+                orig_x + orig_w,
+                orig_y + orig_h,
+                confidence=0.35,
+                cls_name="mser",
             )
+            det = det.clipped(w, h)
+            if not _valid_tag_geometry(det):
+                continue
 
-        result = _nms(dets)
-        logger.debug("MSERDetector: %d raw → %d after NMS", len(dets), len(result))
+            # Boost rectangular regions with orange/yellow/red background typical for price tags.
+            crop = frame[det.y_min : det.y_max, det.x_min : det.x_max]
+            color_boost = _price_tag_color_score(crop)
+            text_boost = _text_edge_score(crop)
+            det.confidence = min(
+                0.99, 0.20 + 0.45 * color_boost + 0.35 * text_boost
+            )
+            if det.confidence >= 0.25:
+                dets.append(det)
+
+        result = _nms(dets, iou_thr=0.42)
+        logger.debug(
+            "MSERDetector: %d raw -> %d after NMS", len(dets), len(result)
+        )
         return result
 
-    def visualize(self, frame: np.ndarray, detections: list[Detection]) -> np.ndarray:
+    def visualize(
+        self, frame: np.ndarray, detections: list[Detection]
+    ) -> np.ndarray:
         out = frame.copy()
         for d in detections:
-            cv2.rectangle(out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 255, 0), 6)
+            cv2.rectangle(
+                out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 255, 0), 6
+            )
             cv2.putText(
                 out,
-                f"tag {d.confidence:.2f}",
+                f"{d.cls_name} {d.confidence:.2f}",
                 (d.x_min, max(40, d.y_min - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.5,
@@ -138,41 +198,72 @@ class MSERDetector:
 
 
 class YOLODetector:
-    """YOLOv8 детектор (этап 12, псевдо-лейблы)."""
+    """Generic YOLO wrapper. Use only with a trained price-tag model."""
 
-    def __init__(self, model_name: str = "yolov8n.pt", confidence: float = 0.3, process_width: int = 1280):
+    def __init__(
+        self,
+        model_name: str = "models/pricetag_yolov8n.pt",
+        confidence: float = 0.25,
+        process_width: int = 1600,
+    ):
         self.model_name = model_name
         self.confidence = confidence
         self.process_width = process_width
         self._model = None
+        self._disabled = False
 
     def _load(self) -> None:
+        from pathlib import Path
+
+        if not Path(self.model_name).exists():
+            logger.warning("YOLO weights not found: %s", self.model_name)
+            self._disabled = True
+            return
         from ultralytics import YOLO
 
         self._model = YOLO(self.model_name)
         logger.info("YOLO загружен: %s", self.model_name)
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
+        if self._disabled:
+            return []
         if self._model is None:
             self._load()
+            if self._disabled:
+                return []
         h, w = frame.shape[:2]
         scale = min(1.0, self.process_width / max(w, h))
-        small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1.0 else frame
+        small = (
+            cv2.resize(frame, (int(w * scale), int(h * scale)))
+            if scale < 1.0
+            else frame
+        )
         results = self._model(small, verbose=False, conf=self.confidence)[0]
         dets: list[Detection] = []
         for box in results.boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             conf = float(box.conf[0])
-            cls_name = results.names.get(int(box.cls[0]), "")
-            det = Detection(int(x1 / scale), int(y1 / scale), int(x2 / scale), int(y2 / scale), conf, cls_name)
-            if det.area >= _MIN_AREA_ORIG and _ASPECT_MIN <= det.aspect <= _ASPECT_MAX:
+            cls_name = results.names.get(int(box.cls[0]), "tag")
+            det = Detection(
+                int(x1 / scale),
+                int(y1 / scale),
+                int(x2 / scale),
+                int(y2 / scale),
+                conf,
+                cls_name,
+            ).clipped(w, h)
+            if _valid_tag_geometry(det):
                 dets.append(det)
-        return _nms(dets)
+        return _nms(dets, iou_thr=0.45)
 
-    def visualize(self, frame: np.ndarray, detections: list[Detection]) -> np.ndarray:
+    def visualize(
+        self, frame: np.ndarray, detections: list[Detection]
+    ) -> np.ndarray:
         out = frame.copy()
         for d in detections:
-            cv2.rectangle(out, (d.x_min, d.y_min), (d.x_max, d.y_max), (255, 100, 0), 6)
+            cv2.rectangle(
+                out, (d.x_min, d.y_min), (d.x_max, d.y_max), (255, 100, 0), 6
+            )
             cv2.putText(
                 out,
                 f"{d.cls_name} {d.confidence:.2f}",
@@ -185,94 +276,134 @@ class YOLODetector:
         return out
 
 
-class YOLOFineTunedDetector:
-    """YOLOv8n дообученный на псевдо-лейблах ценников.
-
-    Использует очень низкий conf (0.02) — модель неуверена на маленьких объектах,
-    но ByteTrack фильтрует нестабильные срабатывания через min_hits.
-    """
-
-    _WEIGHTS = "models/pricetag_yolov8n.pt"
+class YOLOFineTunedDetector(YOLODetector):
+    """Backward-compatible alias for the old fine-tuned detector name."""
 
     def __init__(
         self,
         weights: str | None = None,
-        confidence: float = 0.02,
-        process_width: int = 1280,
+        confidence: float = 0.05,
+        process_width: int = 1600,
     ):
-        self.weights = weights or self._WEIGHTS
-        self.confidence = confidence
-        self.process_width = process_width
-        self._model = None
+        super().__init__(
+            model_name=weights or "models/pricetag_yolov8n.pt",
+            confidence=confidence,
+            process_width=process_width,
+        )
 
-    def _load(self) -> None:
-        from pathlib import Path
 
-        from ultralytics import YOLO
+class HybridDetector:
+    """YOLO tiled detector + MSER fallback, merged by NMS.
 
-        w = Path(self.weights)
-        if not w.exists():
-            logger.warning("Веса не найдены: %s → фоллбек на yolov8n.pt", w)
-            self.weights = "yolov8n.pt"
-        self._model = YOLO(self.weights)
-        logger.info("YOLO fine-tuned загружен: %s", self.weights)
+    It improves recall without making the project unusable when model weights are
+    not bundled in the archive.
+    """
+
+    def __init__(
+        self,
+        primary: object | None = None,
+        fallback: object | None = None,
+        nms_iou: float = 0.40,
+    ):
+        self.primary = primary
+        self.fallback = fallback or MSERDetector()
+        self.nms_iou = nms_iou
+        self._primary_init_attempted = False
+
+    def _get_primary(self):
+        if self.primary is not None or self._primary_init_attempted:
+            return self.primary
+        self._primary_init_attempted = True
+        try:
+            from shelf.detect.yolo_sahi import YOLOSahiDetector
+
+            self.primary = YOLOSahiDetector()
+        except Exception as exc:
+            logger.warning("YOLO tiled недоступен: %s", exc)
+            self.primary = None
+        return self.primary
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
-        if self._model is None:
-            self._load()
-        h, w = frame.shape[:2]
-        scale = min(1.0, self.process_width / max(w, h))
-        small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1.0 else frame
-        results = self._model(small, verbose=False, conf=self.confidence)[0]
         dets: list[Detection] = []
-        for box in results.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            conf = float(box.conf[0])
-            det = Detection(
-                int(x1 / scale),
-                int(y1 / scale),
-                int(x2 / scale),
-                int(y2 / scale),
-                conf,
-                "tag",
-            )
-            if det.area >= _MIN_AREA_ORIG and _ASPECT_MIN <= det.aspect <= _ASPECT_MAX:
-                dets.append(det)
-        return _nms(dets)
+        primary = self._get_primary()
+        if primary is not None:
+            try:
+                dets.extend(primary.detect(frame))
+            except Exception as exc:
+                logger.warning(
+                    "primary detector failed, using fallback only: %s", exc
+                )
+        try:
+            dets.extend(self.fallback.detect(frame))
+        except Exception as exc:
+            logger.warning("fallback detector failed: %s", exc)
+        return _nms(dets, iou_thr=self.nms_iou)
 
-    def visualize(self, frame: np.ndarray, detections: list[Detection]) -> np.ndarray:
+    def visualize(
+        self, frame: np.ndarray, detections: list[Detection]
+    ) -> np.ndarray:
         out = frame.copy()
         for d in detections:
-            cv2.rectangle(out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 180, 255), 6)
+            cv2.rectangle(
+                out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 220, 255), 6
+            )
             cv2.putText(
                 out,
-                f"ft {d.confidence:.3f}",
+                f"hybrid {d.confidence:.2f}",
                 (d.x_min, max(40, d.y_min - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.5,
-                (0, 180, 255),
+                (0, 220, 255),
                 4,
             )
         return out
 
 
-def make_detector(name: str = "mser"):
-    """Фабрика детекторов по имени.
+def _price_tag_color_score(crop: np.ndarray) -> float:
+    if crop is None or crop.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    # Orange/red/yellow/green labels.
+    masks = [
+        cv2.inRange(hsv, np.array([0, 60, 70]), np.array([28, 255, 255])),
+        cv2.inRange(hsv, np.array([20, 50, 90]), np.array([48, 255, 255])),
+        cv2.inRange(hsv, np.array([35, 45, 60]), np.array([88, 255, 255])),
+    ]
+    frac = max(float(m.mean() / 255.0) for m in masks)
+    return min(1.0, frac / 0.25)
 
-    name: 'mser' | 'yolo' | 'yolo-ft' | 'yolo-tiled'  (или через SHELF_DETECTOR env)
+
+def _text_edge_score(crop: np.ndarray) -> float:
+    if crop is None or crop.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 60, 160)
+    frac = float(edges.mean() / 255.0)
+    return min(1.0, frac / 0.08)
+
+
+def make_detector(name: str = "hybrid"):
+    """Фабрика детекторов.
+
+    Supported: ``hybrid`` | ``yolo-tiled`` | ``yolo-ft`` | ``mser`` | ``yolo``.
+    Environment variable ``SHELF_DETECTOR`` overrides the argument.
     """
     import os
 
     name = os.environ.get("SHELF_DETECTOR", name).lower()
+    if name == "hybrid":
+        return HybridDetector()
     if name == "yolo-tiled":
         from shelf.detect.yolo_sahi import YOLOSahiDetector
+
         return YOLOSahiDetector()
     if name == "yolo-ft":
         return YOLOFineTunedDetector()
     if name == "yolo":
         return YOLODetector()
-    return MSERDetector()
+    if name == "mser":
+        return MSERDetector()
+    raise ValueError(f"Unknown detector: {name}")
 
 
-# Алиас по умолчанию — MSER без обучения
-PriceTagDetector = MSERDetector
+PriceTagDetector = HybridDetector

@@ -1,11 +1,13 @@
-"""Предобработка кропа ценника перед OCR.
+"""Предобработка кропа ценника перед OCR/QR.
 
-Шаги:
-1. Поворот на 180° (ценники смонтированы вниз головой)
-2. Deskew через Canny + HoughLines (коррекция угла наклона)
-3. Upscale + sharpening (для лучшего OCR)
-4. CLAHE (выравнивание гистограммы) для улучшения контраста
+Goals:
+1. rotate price tags into a readable orientation;
+2. reduce glare and low contrast;
+3. deskew small angular errors;
+4. optionally correct perspective when a rectangular paper contour is visible.
 """
+
+from __future__ import annotations
 
 import cv2
 import numpy as np
@@ -21,67 +23,221 @@ def _rotate_image(img: np.ndarray, angle_deg: float) -> np.ndarray:
     new_h = int(h * cos_a + w * sin_a)
     M[0, 2] += new_w / 2 - cx
     M[1, 2] += new_h / 2 - cy
-    return cv2.warpAffine(img, M, (new_w, new_h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REPLICATE)
+    return cv2.warpAffine(
+        img,
+        M,
+        (new_w, new_h),
+        flags=cv2.INTER_LANCZOS4,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
 
 def deskew_angle(img: np.ndarray) -> float:
-    """Определить угол наклона текста через минимальную ограничивающую область."""
+    """Estimate text skew angle in degrees using foreground min-area rectangle."""
+    if img is None or img.size == 0:
+        return 0.0
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, thresh = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
     coords = np.column_stack(np.where(thresh > 0))
-    if len(coords) < 10:
+    if len(coords) < 30:
         return 0.0
     angle = cv2.minAreaRect(coords)[-1]
-    # minAreaRect возвращает угол -90..0; нормализуем к -45..45
     if angle < -45:
         angle += 90
-    return -angle  # знак для warpAffine
+    if angle > 45:
+        angle -= 90
+    return -float(angle)
+
+
+def suppress_glare(img: np.ndarray) -> np.ndarray:
+    """Inpaint small overexposed glare spots.
+
+    This helps on glossy/glass shelves without changing the whole color layout.
+    """
+    if img is None or img.size == 0 or img.ndim != 3:
+        return img
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    _, s, v = cv2.split(hsv)
+    mask = ((s < 45) & (v > 235)).astype(np.uint8) * 255
+    # Ignore tiny salt-noise and avoid inpainting if almost the whole image is white.
+    if mask.mean() < 1 or mask.mean() > 95:
+        return img
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    return cv2.inpaint(img, mask, 3, cv2.INPAINT_TELEA)
+
+
+def _order_points(pts: np.ndarray) -> np.ndarray:
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+
+def perspective_correct(
+    img: np.ndarray, min_area_frac: float = 0.20
+) -> np.ndarray:
+    """Try to rectify a visible rectangular price tag contour.
+
+    If no reliable four-point contour is found, returns the original image.
+    """
+    if img is None or img.size == 0:
+        return img
+    H, W = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 40, 140)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+    contours, _ = cv2.findContours(
+        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return img
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < H * W * min_area_frac:
+            continue
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.03 * peri, True)
+        if len(approx) != 4:
+            continue
+        rect = _order_points(approx.reshape(4, 2).astype("float32"))
+        (tl, tr, br, bl) = rect
+        width_a = np.linalg.norm(br - bl)
+        width_b = np.linalg.norm(tr - tl)
+        height_a = np.linalg.norm(tr - br)
+        height_b = np.linalg.norm(tl - bl)
+        max_w = int(max(width_a, width_b))
+        max_h = int(max(height_a, height_b))
+        if max_w < 40 or max_h < 40:
+            continue
+        dst = np.array(
+            [[0, 0], [max_w - 1, 0], [max_w - 1, max_h - 1], [0, max_h - 1]],
+            dtype="float32",
+        )
+        M = cv2.getPerspectiveTransform(rect, dst)
+        return cv2.warpPerspective(
+            img,
+            M,
+            (max_w, max_h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+    return img
+
+
+def enhance_contrast(img: np.ndarray) -> np.ndarray:
+    """CLAHE on the L-channel, conservative settings."""
+    if img is None or img.size == 0 or img.ndim != 3:
+        return img
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    lch, ach, bch = cv2.split(lab)
+    clahe_obj = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
+    lch = clahe_obj.apply(lch)
+    return cv2.cvtColor(cv2.merge([lch, ach, bch]), cv2.COLOR_LAB2BGR)
 
 
 def preprocess_crop(
     crop: np.ndarray,
-    rotate_180: bool = True,  # параметр оставлен для обратной совместимости
+    rotate_180: bool = True,  # retained for backward compatibility; means "orient for OCR"
     deskew: bool = True,
-    upscale: int = 5,
-    sharpen: bool = True,
-    clahe: bool = True,
+    upscale: int = 2,
+    sharpen: bool = False,
+    clahe: bool = False,
+    glare: bool = True,
+    perspective: bool = False,
 ) -> np.ndarray:
-    """Подготовить кроп ценника для OCR.
+    """Prepare a price-tag crop for OCR.
 
-    Ценники Ленты смонтированы боком: правильный поворот 90°CCW.
-    Параметр rotate_180 сохранён для совместимости, фактически делаем 90°CCW.
+    Most supplied Lenta frames store tags sideways; when ``rotate_180`` is True
+    we rotate 90° counter-clockwise, matching the previous project behavior.
     """
     if crop is None or crop.size == 0:
         return crop
 
     img = crop.copy()
 
-    # 1. Поворот 90°CCW — ценники смонтированы боком, не 180°
+    if perspective:
+        img = perspective_correct(img)
+
     if rotate_180:
         img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-    # 2. Deskew (коррекция наклона ±15°)
+    if glare:
+        img = suppress_glare(img)
+
     if deskew:
         angle = deskew_angle(img)
-        if abs(angle) > 1.0 and abs(angle) < 30:
+        if 1.0 < abs(angle) < 20:
             img = _rotate_image(img, angle)
 
-    # 3. Upscale
     if upscale > 1:
         h, w = img.shape[:2]
-        img = cv2.resize(img, (w * upscale, h * upscale), interpolation=cv2.INTER_LANCZOS4)
+        img = cv2.resize(
+            img, (w * upscale, h * upscale), interpolation=cv2.INTER_LANCZOS4
+        )
 
-    # 4. Sharpen
+    if clahe:
+        img = enhance_contrast(img)
+
     if sharpen:
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        kernel = np.array(
+            [[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32
+        )
         img = cv2.filter2D(img, -1, kernel)
 
-    # 5. CLAHE на L-канале LAB для улучшения контраста
-    if clahe:
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        lch, ach, bch = cv2.split(lab)
-        clahe_obj = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        lch = clahe_obj.apply(lch)
-        img = cv2.cvtColor(cv2.merge([lch, ach, bch]), cv2.COLOR_LAB2BGR)
-
     return img
+
+
+def ocr_variants(crop: np.ndarray) -> list[np.ndarray]:
+    """Small set of OCR variants ordered from safest to most aggressive."""
+    if crop is None or crop.size == 0:
+        return []
+    base = preprocess_crop(
+        crop, upscale=2, glare=True, deskew=True, sharpen=False, clahe=False
+    )
+    variants = [base]
+    variants.append(
+        preprocess_crop(
+            crop, upscale=3, glare=True, deskew=True, sharpen=False, clahe=True
+        )
+    )
+    variants.append(
+        preprocess_crop(
+            crop, upscale=2, glare=True, deskew=True, sharpen=True, clahe=False
+        )
+    )
+    return variants
+
+
+def qr_variants(crop: np.ndarray) -> list[np.ndarray]:
+    """Image variants useful for QR/barcode decoding."""
+    if crop is None or crop.size == 0:
+        return []
+    variants: list[np.ndarray] = []
+    for rot in (
+        None,
+        cv2.ROTATE_90_COUNTERCLOCKWISE,
+        cv2.ROTATE_180,
+        cv2.ROTATE_90_CLOCKWISE,
+    ):
+        img = cv2.rotate(crop, rot) if rot is not None else crop
+        img = suppress_glare(img)
+        variants.append(img)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        variants.append(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+        _, otsu = cv2.threshold(
+            gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
+    return variants

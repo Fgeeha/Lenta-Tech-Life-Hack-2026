@@ -1,16 +1,51 @@
-"""Frame sampler — извлечение кадров из видео."""
+"""Frame sampler — извлечение информативных кадров из видео."""
+
+from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Generator
+from typing import Callable, Generator
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Порог среднего оптического потока ниже которого считаем, что робот стоит
-_FLOW_STILL_THRESHOLD = 0.5
+# Порог среднего оптического потока ниже которого считаем, что кадр почти дублирует предыдущий.
+_FLOW_STILL_THRESHOLD = 0.35
+
+
+def laplacian_sharpness(image: np.ndarray) -> float:
+    """Variance of Laplacian: higher means sharper."""
+    if image is None or image.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def glare_fraction(image: np.ndarray) -> float:
+    """Approximate share of overexposed low-saturation pixels."""
+    if image is None or image.size == 0:
+        return 0.0
+    if image.ndim == 3:
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        _, s, v = cv2.split(hsv)
+        mask = (s < 45) & (v > 235)
+    else:
+        mask = image > 245
+    return float(mask.mean())
+
+
+def frame_quality_score(image: np.ndarray) -> float:
+    """OCR-friendly frame score: sharpness penalized by glare and very dark frames."""
+    if image is None or image.size == 0:
+        return 0.0
+    sharp = laplacian_sharpness(image)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    brightness = float(gray.mean()) / 255.0
+    exposure_penalty = 1.0 - min(0.65, glare_fraction(image) * 2.5)
+    dark_penalty = max(0.35, min(1.0, brightness / 0.35))
+    return sharp * exposure_penalty * dark_penalty
 
 
 def sample_frames(
@@ -18,12 +53,17 @@ def sample_frames(
     interval_ms: int = 200,
     adaptive: bool = True,
     max_dim: int = 1280,
+    min_sharpness: float = 0.0,
+    max_frames: int | None = None,
+    max_timestamp_ms: float | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> Generator[tuple[float, np.ndarray], None, None]:
-    """Yield (timestamp_sec, frame) с заданным интервалом.
+    """Yield ``(timestamp_ms, frame)`` with a fixed/adaptive stride.
 
-    При adaptive=True пропускает дубли когда робот стоит (оптический поток мал).
-    max_dim: длинная сторона кадра для детекции (не меняет сохранённые координаты —
-    координаты возвращаются в масштабе оригинала).
+    ``timestamp_ms`` is milliseconds from the beginning of the video, which is the
+    unit required by the output CSV. Older versions yielded seconds; the pipeline
+    now keeps milliseconds end-to-end.  ``max_timestamp_ms`` lets callers enforce
+    UI smoke-test/duration limits without decoding the rest of a long video.
     """
     video_path = Path(video_path)
     cap = cv2.VideoCapture(str(video_path))
@@ -37,31 +77,38 @@ def sample_frames(
     step = max(1, int(fps * interval_ms / 1000))
 
     logger.info(
-        "Видео: %s  %.1f fps  %d кадров  %ds  %dx%d",
+        "Видео: %s  %.1f fps  %d кадров  %.1fs  %dx%d",
         video_path.name,
         fps,
         total,
-        total / fps,
+        total / fps if fps else 0,
         w,
         h,
     )
 
-    scale = min(1.0, max_dim / max(w, h))
+    scale = min(1.0, max_dim / max(w, h)) if max(w, h) else 1.0
     prev_gray: np.ndarray | None = None
     frame_idx = 0
     yielded = 0
 
     try:
         while True:
+            ts_ms = frame_idx / fps * 1000.0
+            if max_timestamp_ms is not None and ts_ms > max_timestamp_ms:
+                break
+
             ret, frame = cap.read()
             if not ret:
                 break
 
             if frame_idx % step == 0:
-                ts = frame_idx / fps
 
                 if adaptive:
-                    small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1 else frame
+                    small = (
+                        cv2.resize(frame, (int(w * scale), int(h * scale)))
+                        if scale < 1
+                        else frame
+                    )
                     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
                     if prev_gray is not None:
                         flow = cv2.calcOpticalFlowFarneback(
@@ -76,20 +123,40 @@ def sample_frames(
                             poly_sigma=1.1,
                             flags=0,
                         )
-                        mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).mean()
-                        if mag < _FLOW_STILL_THRESHOLD:
+                        mag = np.sqrt(
+                            flow[..., 0] ** 2 + flow[..., 1] ** 2
+                        ).mean()
+                        # Пропускаем только почти идентичные дубли. При остановке робота
+                        # всё равно оставляем первый резкий кадр.
+                        if mag < _FLOW_STILL_THRESHOLD and yielded > 0:
                             frame_idx += 1
                             prev_gray = gray
                             continue
                     prev_gray = gray
 
-                yield ts, frame
+                if (
+                    min_sharpness > 0
+                    and laplacian_sharpness(frame) < min_sharpness
+                ):
+                    frame_idx += 1
+                    continue
+
+                yield ts_ms, frame
                 yielded += 1
+                if progress_callback and total > 0:
+                    progress_callback(
+                        min(0.35, 0.35 * frame_idx / total),
+                        f"Извлечено кадров: {yielded}",
+                    )
+                if max_frames is not None and yielded >= max_frames:
+                    break
 
             frame_idx += 1
     finally:
         cap.release()
-        logger.info("Семплирование завершено: выдано %d кадров из %d", yielded, total)
+        logger.info(
+            "Семплирование завершено: выдано %d кадров из %d", yielded, total
+        )
 
 
 def save_debug_frames(
@@ -105,14 +172,16 @@ def save_debug_frames(
     video_path = Path(video_path)
     saved: list[Path] = []
 
-    for ts, frame in sample_frames(video_path, interval_ms=interval_ms, adaptive=False):
+    for ts_ms, frame in sample_frames(
+        video_path, interval_ms=interval_ms, adaptive=False
+    ):
         if len(saved) >= max_frames:
             break
         h, w = frame.shape[:2]
         scale = min(1.0, max_dim / max(w, h))
         if scale < 1:
             frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-        name = f"{video_path.stem}_{ts:.1f}s.jpg"
+        name = f"{video_path.stem}_{ts_ms / 1000.0:.1f}s.jpg"
         dest = out_dir / name
         cv2.imwrite(str(dest), frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         saved.append(dest)

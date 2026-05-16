@@ -1,7 +1,6 @@
 """Tests for multi-frame alignment and blending."""
 
 import numpy as np
-import pytest
 
 from shelf.mfsr.align_blend import align_and_blend
 
@@ -38,6 +37,7 @@ def test_two_identical_frames_blend():
 def test_small_shift_is_corrected():
     ref = _make_frame()
     import cv2
+
     # Shift by (2, 1) pixels
     M = np.float32([[1, 0, 2], [0, 1, 1]])
     shifted = cv2.warpAffine(ref, M, (ref.shape[1], ref.shape[0]))
@@ -46,12 +46,15 @@ def test_small_shift_is_corrected():
     assert result.shape == ref.shape
     # Should not crash; result should be close to ref
     diff = np.abs(result.astype(int) - ref.astype(int)).mean()
-    assert diff < 20, f"Blend should be close to reference, got mean diff {diff:.1f}"
+    assert (
+        diff < 20
+    ), f"Blend should be close to reference, got mean diff {diff:.1f}"
 
 
 def test_large_shift_frame_skipped():
     ref = _make_frame()
     import cv2
+
     # Shift by 50 pixels (way above max_shift=10)
     M = np.float32([[1, 0, 50], [0, 1, 0]])
     far_shifted = cv2.warpAffine(ref, M, (ref.shape[1], ref.shape[0]))
@@ -62,7 +65,10 @@ def test_large_shift_frame_skipped():
 
 
 def test_five_frames_blend():
-    frames = [(float(i + 1), _make_frame(color=120 + i * 5), float(i * 100)) for i in range(5)]
+    frames = [
+        (float(i + 1), _make_frame(color=120 + i * 5), float(i * 100))
+        for i in range(5)
+    ]
     result = align_and_blend(frames)
     assert result.shape == frames[0][1].shape
     assert result.dtype == np.uint8

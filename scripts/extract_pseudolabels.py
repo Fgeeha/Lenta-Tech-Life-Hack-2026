@@ -34,8 +34,14 @@ OUT_ROOT = Path("data/pseudo")
 
 # GT CSV для train (25_12-20, 26_12-20) и val (43_15)
 GT_TRAIN = [
-    (DATA_ROOT / "25_12-20" / "25_12-20.mp4", DATA_ROOT / "25_12-20" / "25_12-20.csv"),
-    (DATA_ROOT / "26_12-20" / "26_12-20.mp4", DATA_ROOT / "26_12-20" / "26_12-20.csv"),
+    (
+        DATA_ROOT / "25_12-20" / "25_12-20.mp4",
+        DATA_ROOT / "25_12-20" / "25_12-20.csv",
+    ),
+    (
+        DATA_ROOT / "26_12-20" / "26_12-20.mp4",
+        DATA_ROOT / "26_12-20" / "26_12-20.csv",
+    ),
 ]
 GT_VAL = [
     (DATA_ROOT / "43_15" / "43_15.mp4", DATA_ROOT / "43_15" / "43_15.csv"),
@@ -69,12 +75,20 @@ def _norm_barcode(val) -> str:
 def _load_gt(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path, decimal=",")
     if "wholesale_level_1_coun" in df.columns:
-        df = df.rename(columns={"wholesale_level_1_coun": "wholesale_level_1_count"})
+        df = df.rename(
+            columns={"wholesale_level_1_coun": "wholesale_level_1_count"}
+        )
     return df
 
 
 def _bbox_to_yolo(
-    x_min: float, y_min: float, x_max: float, y_max: float, frame_w: int, frame_h: int, expand: float = 1.0
+    x_min: float,
+    y_min: float,
+    x_max: float,
+    y_max: float,
+    frame_w: int,
+    frame_h: int,
+    expand: float = 1.0,
 ) -> tuple | None:
     """Перевести bbox в нормированный YOLO-формат с расширением."""
     bw = (x_max - x_min) * expand
@@ -98,7 +112,9 @@ def _bbox_to_yolo(
     return cx, cy, nw, nh
 
 
-def _try_qr(frame: np.ndarray, x_min: int, y_min: int, x_max: int, y_max: int) -> bool:
+def _try_qr(
+    frame: np.ndarray, x_min: int, y_min: int, x_max: int, y_max: int
+) -> bool:
     """Попробовать декодировать QR в bbox (верификация что это реальный ценник)."""
     from shelf.qr.decoder import decode_qr
 
@@ -144,7 +160,12 @@ def _save_sample(
 
 
 def extract_gt(
-    video_path: Path, csv_path: Path, split: str, expand: float, max_per_ts: int = 1, dry_run: bool = False
+    video_path: Path,
+    csv_path: Path,
+    split: str,
+    expand: float,
+    max_per_ts: int = 1,
+    dry_run: bool = False,
 ) -> dict:
     """Извлечь лейблы из GT CSV (точные аннотации хакатона)."""
     df = _load_gt(csv_path)
@@ -163,7 +184,9 @@ def extract_gt(
         cap.set(cv2.CAP_PROP_POS_MSEC, float(ts_ms))
         ret, frame = cap.read()
         if not ret:
-            logger.warning("Не удалось прочитать кадр ts=%d в %s", ts_ms, video_stem)
+            logger.warning(
+                "Не удалось прочитать кадр ts=%d в %s", ts_ms, video_stem
+            )
             continue
 
         rows = df[df.frame_timestamp == ts_ms]
@@ -186,13 +209,21 @@ def extract_gt(
 
             # QR-верификация для первых нескольких боксов
             if not any_qr:
-                any_qr = _try_qr(frame, int(row.x_min), int(row.y_min), int(row.x_max), int(row.y_max))
+                any_qr = _try_qr(
+                    frame,
+                    int(row.x_min),
+                    int(row.y_min),
+                    int(row.x_max),
+                    int(row.y_max),
+                )
 
         if not bboxes:
             continue
 
         stem = f"{video_stem}_{ts_ms}"
-        n = _save_sample(frame, stem, bboxes, split, high_quality=any_qr, dry_run=dry_run)
+        n = _save_sample(
+            frame, stem, bboxes, split, high_quality=any_qr, dry_run=dry_run
+        )
         saved_frames += n
         saved_boxes += len(bboxes) * n
         if any_qr:
@@ -202,7 +233,13 @@ def extract_gt(
     return {"frames": saved_frames, "boxes": saved_boxes, "hq": hq_count}
 
 
-def extract_mser_pseudo(video_path: Path, split: str, expand: float, stride_ms: int, dry_run: bool = False) -> dict:
+def extract_mser_pseudo(
+    video_path: Path,
+    split: str,
+    expand: float,
+    stride_ms: int,
+    dry_run: bool = False,
+) -> dict:
     """Извлечь псевдо-лейблы через MSER + ByteTrack для unlabeled видео."""
     from shelf.detect.detector import MSERDetector
     from shelf.detect.tracker import Tracker
@@ -212,7 +249,9 @@ def extract_mser_pseudo(video_path: Path, split: str, expand: float, stride_ms: 
     detector = MSERDetector()
     tracker = Tracker(min_hits=3)
 
-    for ts, frame in sample_frames(video_path, interval_ms=stride_ms, adaptive=True):
+    for ts, frame in sample_frames(
+        video_path, interval_ms=stride_ms, adaptive=True
+    ):
         dets = detector.detect(frame)
         tracker.update(dets, frame, ts)
 
@@ -233,7 +272,15 @@ def extract_mser_pseudo(video_path: Path, split: str, expand: float, stride_ms: 
         if state.best_frame is None:
             continue
         d = state.best_det
-        yolo = _bbox_to_yolo(d.x_min, d.y_min, d.x_max, d.y_max, frame_w_orig, frame_h_orig, expand=expand)
+        yolo = _bbox_to_yolo(
+            d.x_min,
+            d.y_min,
+            d.x_max,
+            d.y_max,
+            frame_w_orig,
+            frame_h_orig,
+            expand=expand,
+        )
         if yolo is None:
             continue
 
@@ -252,7 +299,14 @@ def extract_mser_pseudo(video_path: Path, split: str, expand: float, stride_ms: 
         seen_stems.add(stem)
 
         any_qr = _try_qr(full_frame, d.x_min, d.y_min, d.x_max, d.y_max)
-        n = _save_sample(full_frame, stem, [yolo], split, high_quality=any_qr, dry_run=dry_run)
+        n = _save_sample(
+            full_frame,
+            stem,
+            [yolo],
+            split,
+            high_quality=any_qr,
+            dry_run=dry_run,
+        )
         saved_frames += n
         saved_boxes += n
         if any_qr:
@@ -280,7 +334,9 @@ def log_metrics(stats: dict) -> None:
     import subprocess
     from datetime import date
 
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    commit = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
     today = date.today().isoformat()
     line = (
         f"| {today} | {commit} | pseudo-labels | — | "
@@ -294,20 +350,48 @@ def log_metrics(stats: dict) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Извлечь псевдо-лейблы для YOLO")
-    parser.add_argument("--dry-run", action="store_true", help="Только подсчёт, без записи файлов")
-    parser.add_argument("--unlabeled", action="store_true", help="Добавить unlabeled видео через MSER")
-    parser.add_argument("--stride", type=int, default=500, help="Интервал MSER (мс)")
-    parser.add_argument("--expand", type=float, default=BBOX_EXPAND, help="Расширение bbox")
+    parser = argparse.ArgumentParser(
+        description="Извлечь псевдо-лейблы для YOLO"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Только подсчёт, без записи файлов",
+    )
+    parser.add_argument(
+        "--unlabeled",
+        action="store_true",
+        help="Добавить unlabeled видео через MSER",
+    )
+    parser.add_argument(
+        "--stride", type=int, default=500, help="Интервал MSER (мс)"
+    )
+    parser.add_argument(
+        "--expand", type=float, default=BBOX_EXPAND, help="Расширение bbox"
+    )
     args = parser.parse_args()
 
-    total = {"train_frames": 0, "train_boxes": 0, "val_frames": 0, "val_boxes": 0, "hq": 0}
+    total = {
+        "train_frames": 0,
+        "train_boxes": 0,
+        "val_frames": 0,
+        "val_boxes": 0,
+        "hq": 0,
+    }
 
     # --- Train: GT из 25_12-20 и 26_12-20 ---
     for video_path, csv_path in GT_TRAIN:
         logger.info("GT train: %s", video_path.name)
-        r = extract_gt(video_path, csv_path, "train", expand=args.expand, dry_run=args.dry_run)
-        logger.info("  frames=%d  boxes=%d  hq=%d", r["frames"], r["boxes"], r["hq"])
+        r = extract_gt(
+            video_path,
+            csv_path,
+            "train",
+            expand=args.expand,
+            dry_run=args.dry_run,
+        )
+        logger.info(
+            "  frames=%d  boxes=%d  hq=%d", r["frames"], r["boxes"], r["hq"]
+        )
         total["train_frames"] += r["frames"]
         total["train_boxes"] += r["boxes"]
         total["hq"] += r["hq"]
@@ -315,8 +399,16 @@ def main() -> None:
     # --- Val: GT из 43_15 ---
     for video_path, csv_path in GT_VAL:
         logger.info("GT val: %s", video_path.name)
-        r = extract_gt(video_path, csv_path, "val", expand=args.expand, dry_run=args.dry_run)
-        logger.info("  frames=%d  boxes=%d  hq=%d", r["frames"], r["boxes"], r["hq"])
+        r = extract_gt(
+            video_path,
+            csv_path,
+            "val",
+            expand=args.expand,
+            dry_run=args.dry_run,
+        )
+        logger.info(
+            "  frames=%d  boxes=%d  hq=%d", r["frames"], r["boxes"], r["hq"]
+        )
         total["val_frames"] += r["frames"]
         total["val_boxes"] += r["boxes"]
         total["hq"] += r["hq"]
@@ -326,9 +418,15 @@ def main() -> None:
         for video_path in UNLABELED:
             logger.info("MSER pseudo: %s", video_path.name)
             r = extract_mser_pseudo(
-                video_path, "train", expand=MSER_EXPAND, stride_ms=args.stride, dry_run=args.dry_run
+                video_path,
+                "train",
+                expand=MSER_EXPAND,
+                stride_ms=args.stride,
+                dry_run=args.dry_run,
             )
-            logger.info("  frames=%d  boxes=%d  hq=%d", r["frames"], r["boxes"], r["hq"])
+            logger.info(
+                "  frames=%d  boxes=%d  hq=%d", r["frames"], r["boxes"], r["hq"]
+            )
             total["train_frames"] += r["frames"]
             total["train_boxes"] += r["boxes"]
             total["hq"] += r["hq"]

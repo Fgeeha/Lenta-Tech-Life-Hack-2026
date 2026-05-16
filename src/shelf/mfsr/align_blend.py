@@ -66,17 +66,19 @@ def align_and_blend(
         img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
         # Phase correlation with windowing for sub-pixel accuracy
-        (dx, dy), _ = cv2.phaseCorrelate(
-            ref_gray * win2d, img_gray * win2d
-        )
+        (dx, dy), _ = cv2.phaseCorrelate(ref_gray * win2d, img_gray * win2d)
 
         if abs(dx) > max_shift or abs(dy) > max_shift:
-            logger.debug("Frame skip: shift=(%.1f, %.1f) > max=%d", dx, dy, max_shift)
+            logger.debug(
+                "Frame skip: shift=(%.1f, %.1f) > max=%d", dx, dy, max_shift
+            )
             continue
 
         M = np.float32([[1, 0, dx], [0, 1, dy]])
         warped = cv2.warpAffine(
-            img, M, (w, h),
+            img,
+            M,
+            (w, h),
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REFLECT,
         )
@@ -91,5 +93,10 @@ def align_and_blend(
         result += (score / total_score) * frame_bgr.astype(np.float64)
 
     blended = np.clip(result, 0, 255).astype(np.uint8)
-    logger.debug("Blended %d/%d frames, total_score=%.0f", len(aligned), len(frames), total_score)
+    logger.debug(
+        "Blended %d/%d frames, total_score=%.0f",
+        len(aligned),
+        len(frames),
+        total_score,
+    )
     return blended

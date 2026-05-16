@@ -1,12 +1,11 @@
-"""Склейка данных OCR + QR.
+"""Merge OCR + QR fields and derive stable business fields."""
 
-Приоритеты:
-- QR-поля (barcode, цены) > OCR (QR надёжнее, не искажён перспективой)
-- OCR-поле > пустая строка (если QR не дал данных — ставим OCR)
-- barcode: если QR-barcode есть → копируем в barcode (кросс-валидация)
-"""
+from __future__ import annotations
 
-from shelf.schema import PriceTag
+from typing import Any
+
+from shelf.schema import ABSENT_VALUE, PriceTag
+from shelf.validation import normalize_ean13
 
 _QR_PRIORITY_FIELDS = {
     "qr_code_barcode",
@@ -21,87 +20,120 @@ _QR_PRIORITY_FIELDS = {
     "action_price_qr",
     "action_code_qr",
 }
+_EMPTY = ("", ABSENT_VALUE, None)
 
 
 def merge(ocr_tag: PriceTag, qr_fields: dict[str, str]) -> PriceTag:
-    """Наложить QR-поля поверх OCR-результата."""
+    """Overlay QR fields over OCR result and derive missing values."""
     data = ocr_tag.__dict__.copy()
     for field, value in qr_fields.items():
-        if value and value.strip():
-            if field in _QR_PRIORITY_FIELDS:
-                data[field] = value
-            elif not data.get(field):
-                data[field] = value
+        value = str(value).strip() if value is not None else ""
+        if not value:
+            continue
+        if field in _QR_PRIORITY_FIELDS:
+            data[field] = value
+        elif data.get(field) in _EMPTY:
+            data[field] = value
 
-    # Если QR дал barcode → используем как основной barcode (если OCR не дал)
-    qr_bc = data.get("qr_code_barcode", "нет")
-    if qr_bc and qr_bc != "нет" and not data.get("barcode"):
-        data["barcode"] = _normalize_barcode(qr_bc)
+    qr_bc = data.get("qr_code_barcode", ABSENT_VALUE)
+    if qr_bc not in _EMPTY:
+        data["qr_code_barcode"] = _normalize_barcode(qr_bc)
+        if data.get("barcode") in _EMPTY:
+            data["barcode"] = data["qr_code_barcode"]
 
-    # Lenta-специфичная структура: если QR не прочитан, выводим поля из OCR.
-    # Статистика GT: price4_qr==price_card (96%), price1_qr==price_default (97%),
-    # qr_code_barcode==barcode (98%) — устойчивые соответствия по бизнес-логике.
-    _empty = ("", "нет")
+    barcode = data.get("barcode", "")
+    if barcode not in _EMPTY:
+        data["barcode"] = _normalize_barcode(barcode)
+        if data.get("qr_code_barcode") in _EMPTY:
+            data["qr_code_barcode"] = data["barcode"]
+
+    # Lenta business mapping observed in the provided examples:
+    # price1_qr ~ regular/default price, price4_qr ~ card/action price.
     price_card = data.get("price_card", "")
     price_default = data.get("price_default", "")
-    barcode = data.get("barcode", "")
 
-    # Обратная деривация: QR дал price1_qr, но OCR не прочитал price_default.
-    # price1_qr ≡ price_default в 97% GT-строк.
-    if price_default in _empty:
-        p1_qr = data.get("price1_qr", "")
-        if p1_qr not in _empty:
-            data["price_default"] = p1_qr
-            price_default = p1_qr
+    if price_default in _EMPTY and data.get("price1_qr", "") not in _EMPTY:
+        data["price_default"] = _fmt_price_for_ocr(data["price1_qr"])
+        price_default = data["price_default"]
 
-    if data.get("price4_qr", "") in _empty and price_card not in _empty:
-        data["price4_qr"] = price_card
-    if data.get("price1_qr", "") in _empty and price_default not in _empty:
-        data["price1_qr"] = price_default
-    if data.get("qr_code_barcode", "") in _empty and barcode not in _empty:
-        data["qr_code_barcode"] = barcode
+    if price_card in _EMPTY:
+        for field in ("price4_qr", "action_price_qr", "price2_qr"):
+            if data.get(field, "") not in _EMPTY:
+                data["price_card"] = _fmt_price_for_ocr(data[field])
+                price_card = data["price_card"]
+                break
 
-    # Деривация discount_amount из двух цен.
-    # Lenta GT всегда хранит скидку как "-NN%" (int floor, не round).
-    # Формула верифицирована по всем трём GT-видео.
-    # Используем обновлённый price_default (может прийти из price1_qr).
-    if data.get("discount_amount", "") in _empty:
-        pc = _safe_float(price_card)
-        pd = _safe_float(price_default)
-        if pc and pd and pd > pc > 0:
-            pct = int((1 - pc / pd) * 100)
-            if 1 <= pct <= 99:
-                data["discount_amount"] = f"-{pct}%"
-
-    # Каталог: catalog_precision >> OCR_precision для product_name.
-    # Если barcode известен и в каталоге → product_name из каталога (всегда приоритет).
-    # Логика: barcode→product_name из GT обязательно правильно; OCR-мусор хуже.
-    bc = data.get("barcode", "")
-    if bc and bc not in _empty:
-        from shelf.postproc.catalog import lookup_product_name
-        name = lookup_product_name(bc)
-        if name:
-            data["product_name"] = name
+    _apply_price_consistency(data)
 
     return PriceTag(**data)
 
 
+def _apply_price_consistency(data: dict[str, Any]) -> None:
+    """Derive and correct price fields after OCR+QR merge."""
+    price_card = data.get("price_card", "")
+    price_default = data.get("price_default", "")
+
+    if data.get("price4_qr", "") in _EMPTY and price_card not in _EMPTY:
+        data["price4_qr"] = _fmt_price_for_qr(price_card)
+    if data.get("price1_qr", "") in _EMPTY and price_default not in _EMPTY:
+        data["price1_qr"] = _fmt_price_for_qr(price_default)
+
+    pc = _safe_float(data.get("price_card", ""))
+    pd = _safe_float(data.get("price_default", ""))
+    if pc is not None and pd is not None and pc > pd + 0.009:
+        data["price_card"] = _fmt_price_for_ocr(str(pd))
+        data["price_default"] = _fmt_price_for_ocr(str(pc))
+        pc, pd = pd, pc
+        data["price4_qr"] = _fmt_price_for_qr(data["price_card"])
+        data["price1_qr"] = _fmt_price_for_qr(data["price_default"])
+
+    if data.get("discount_amount", "") in _EMPTY and pc and pd and pd > pc > 0:
+        pct = int((1 - pc / pd) * 100)
+        if 1 <= pct <= 99:
+            data["discount_amount"] = f"-{pct}%"
+
+
 def _safe_float(val: str) -> float | None:
     try:
-        return float(str(val).replace(",", "."))
+        text = (
+            str(val)
+            .strip()
+            .replace("\u00a0", " ")
+            .replace(" ", "")
+            .replace(",", ".")
+        )
+        if not text or text == ABSENT_VALUE:
+            return None
+        return float(text)
     except (ValueError, TypeError):
         return None
 
 
+def _fmt_price_for_ocr(val: str) -> str:
+    f = _safe_float(val)
+    return f"{f:.2f}".replace(".", ",") if f is not None else str(val).strip()
+
+
+def _fmt_price_for_qr(val: str) -> str:
+    f = _safe_float(val)
+    if f is None:
+        return str(val).strip()
+    if f.is_integer():
+        return str(int(f))
+    return f"{f:.2f}"
+
+
 def _normalize_barcode(raw: str) -> str:
-    """Нормализовать штрихкод: убрать пробелы/.0, lpad до 13 цифр."""
+    """Normalize barcode strictly for production rows.
+
+    Only valid EAN-13 values are kept.  Conservative 14→13 repair is allowed to
+    undo pandas/decoder artifacts such as a trailing ``.0`` digit, but 12-digit
+    values are not appended because they can be SKU IDs.
+    """
     try:
-        import re
-        raw = re.sub(r"\s+", "", raw.strip())
-        if "." in raw:
-            raw = str(int(float(raw)))
-        if raw.isdigit() and len(raw) < 13:
-            raw = raw.zfill(13)
-        return raw
+        normalized = normalize_ean13(
+            raw, allow_repair=True, allow_append_12=False, allow_drop_14=True
+        )
+        return normalized
     except (ValueError, OverflowError):
-        return raw
+        return ""

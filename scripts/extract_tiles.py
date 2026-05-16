@@ -27,20 +27,23 @@ OUT_ROOT = Path("data/tiles")
 PSEUDO_ROOT = Path("data/pseudo")
 
 TILE_SIZE = 640
-STRIDE = 512        # overlap = 640 - 512 = 128px (20%)
+STRIDE = 512  # overlap = 640 - 512 = 128px (20%)
 MIN_BBOX_IOU = 0.5  # минимальная доля пересечения bbox с тайлом
 
 
 def _load_gt(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path, decimal=",")
     if "wholesale_level_1_coun" in df.columns:
-        df = df.rename(columns={"wholesale_level_1_coun": "wholesale_level_1_count"})
+        df = df.rename(
+            columns={"wholesale_level_1_coun": "wholesale_level_1_count"}
+        )
     return df
 
 
 def _bbox_intersection(
     box: tuple[float, float, float, float],
-    tile_x: int, tile_y: int,
+    tile_x: int,
+    tile_y: int,
 ) -> tuple[float, float, float, float] | None:
     """Пересечь bbox с тайлом. Вернуть (cx,cy,nw,nh) YOLO или None."""
     bx1, by1, bx2, by2 = box
@@ -117,9 +120,12 @@ def process_frame(
 
             tile_stem = f"{stem}_t{tx}_{ty}"
             if not dry_run:
-                tile = frame[ty:ty + TILE_SIZE, tx:tx + TILE_SIZE]
-                cv2.imwrite(str(img_dir / f"{tile_stem}.jpg"), tile,
-                            [cv2.IMWRITE_JPEG_QUALITY, 92])
+                tile = frame[ty : ty + TILE_SIZE, tx : tx + TILE_SIZE]
+                cv2.imwrite(
+                    str(img_dir / f"{tile_stem}.jpg"),
+                    tile,
+                    [cv2.IMWRITE_JPEG_QUALITY, 92],
+                )
                 with open(lbl_dir / f"{tile_stem}.txt", "w") as f:
                     for cx, cy, nw, nh in yolo_boxes:
                         f.write(f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n")
@@ -201,7 +207,9 @@ def main() -> None:
 
     total_train = sum(stats[k]["tiles"] for k in stats if k != "43_15_val")
     total_val = stats.get("43_15_val", {}).get("tiles", 0)
-    logger.info("=== Итого: train_tiles=%d  val_tiles=%d ===", total_train, total_val)
+    logger.info(
+        "=== Итого: train_tiles=%d  val_tiles=%d ===", total_train, total_val
+    )
 
 
 if __name__ == "__main__":

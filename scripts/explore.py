@@ -63,7 +63,12 @@ def csv_stats(path: Path) -> dict:
             "nan": int(n_nan),
             "empty": int(n_empty),
         }
-    return {"path": path.name, "rows": rows, "columns": list(df.columns), "fields": field_stats}
+    return {
+        "path": path.name,
+        "rows": rows,
+        "columns": list(df.columns),
+        "fields": field_stats,
+    }
 
 
 def main() -> None:
@@ -102,11 +107,15 @@ def main() -> None:
         if missing:
             print(f"  ОТСУТСТВУЮТ в GT:       {sorted(missing)}")
 
-        print(f"  {'Поле':<35} {'заполн':>7} {'нет':>7} {'NaN':>7} {'пусто':>7}")
+        print(
+            f"  {'Поле':<35} {'заполн':>7} {'нет':>7} {'NaN':>7} {'пусто':>7}"
+        )
         print(f"  {'-'*35} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
         for col, s in stats["fields"].items():
             flag = " !" if s["nan"] > 0 else ""
-            print(f"  {col:<35} {s['filled']:>7} {s['absent_нет']:>7} {s['nan']:>7} {s['empty']:>7}{flag}")
+            print(
+                f"  {col:<35} {s['filled']:>7} {s['absent_нет']:>7} {s['nan']:>7} {s['empty']:>7}{flag}"
+            )
 
     print("\n" + "=" * 70)
     print("КЛЮЧЕВЫЕ НАБЛЮДЕНИЯ")

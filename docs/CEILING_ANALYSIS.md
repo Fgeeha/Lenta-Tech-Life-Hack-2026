@@ -130,3 +130,25 @@ Ceiling = 0.004 при текущих данных не является оши�
 Detection recall = 100%, field matching = корректен.  
 Потолок поднимается только аппаратными или data-инженерными улучшениями,
 описанными выше.
+
+## Stage 4 addendum — metric@80 diagnostics and template priors
+
+The organizer matching clarification makes `barcode`/`qr_code_barcode` even more important: they are not only content fields but also the highest-priority matching key.  The next ceiling run should therefore report both field accuracy and `matched_by` distribution (`barcode`, `qr_code_barcode`, `timestamp_bbox`, `not_matched`).
+
+This pass adds rule-based template ROIs and pass80 diagnostics.  It does not claim a new ceiling number because the complete five-video private set is not mounted in this environment.  When the data is available, run:
+
+```bash
+PYTHONPATH=src python scripts/eval_ceiling.py \
+  --data-root Данные \
+  --ocr-engine auto \
+  --json-out reports/ceiling_stage4.json
+PYTHONPATH=src python scripts/eval_on_labeled.py \
+  --data-root Данные \
+  --detector hybrid \
+  --ocr-engine auto \
+  --ocr-top-k 3 \
+  --reports-dir reports/full_eval_stage4 \
+  --json-out reports/full_eval_stage4.json
+```
+
+Use `reports/failed_near_threshold.csv` to find tags that need only one or two additional correct fields to pass the 80% threshold.
