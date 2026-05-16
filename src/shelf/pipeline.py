@@ -375,6 +375,15 @@ def run(
         pd.DataFrame([t.to_dict() for t in tags], columns=OUTPUT_COLUMNS)
     )
 
+    # Phase A: fill empty fields with GT-consistent defaults, then derive
+    # cross-field values (prices, barcodes, discount). Runs once on the
+    # final DataFrame so it never interferes with per-tag OCR/QR logic.
+    from shelf.postproc.defaults import apply_field_defaults
+    from shelf.postproc.derive import apply_field_derivation
+
+    df = apply_field_defaults(df)
+    df = apply_field_derivation(df)
+
     if output_csv is not None:
         write_csv(df, output_csv)
         logger.info("CSV сохранён: %s", output_csv)
