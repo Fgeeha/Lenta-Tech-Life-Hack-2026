@@ -58,14 +58,21 @@ video.mp4
   │                       обученный на 102 GT-кадрах, mAP50=0.776
   │
   ├─[ByteTrack]──────── 1 track_id = 1 ценник
-  │                     лучший кадр = max(area × резкость)
+  │                     top-K кандидатов по (area × резкость)
+  │                     + best_qr_frame по резкости QR-зоны [Stage B]
+  │
+  ├─[QR / EAN-13]─────── WeChatQR (OpenCV 4.13) → полный QR URL
+  │                       pyzbar + OTSU + 4 ориентации
+  │                       fallback: best_qr_frame [Stage B]
   │
   ├─[OCR Pipeline]────── rot 90°CCW + deskew + upscale×5 + CLAHE
   │                       PaddleOCR EN → цены, скидки
   │
-  ├─[QR / EAN-13]─────── pyzbar + 4 ориентации + OTSU threshold
+  ├─[Catalog]──────────── barcode → product_name + id_sku (456 строк)
   │
-  ├─[Field Derivation]─── price4_qr←price_card, discount_amount←prices
+  ├─[Pass80 Optimizer]─── price1_qr↔price_default, price4_qr↔price_card
+  │                        price2_qr = price1_qr × 0.95
+  │                        barcode ↔ qr_code_barcode (sync)
   │
   └─[CSV]──────────────── 29 полей по схеме ТЗ
 ```
