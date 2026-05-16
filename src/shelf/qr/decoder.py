@@ -557,16 +557,13 @@ def decode_qr(
     if crop is None or crop.size == 0 or _decode_mode() == "off":
         return {}
 
-    # Fast pass: cheap decoders first (pyzbar + OpenCV), then WeChatQR once per rotation.
-    # WeChatQR is powerful but ~0.3 s per call — we give it 4 chances (one per rotation)
-    # and only call it when pyzbar+opencv have already failed on that rotation.
+    # Fast pass: cheap decoders on 4 rotations of the full crop (~0.07 s total).
     _fast_rotations = [
         ("orig", crop),
         ("rot90ccw", cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)),
         ("rot180", cv2.rotate(crop, cv2.ROTATE_180)),
         ("rot90cw", cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)),
     ]
-    # Step 1: cheap decoders on all 4 rotations (pyzbar + opencv, ~0.07 s total).
     for rot_name, rot_img in _fast_rotations:
         for raw in _try_pyzbar(rot_img) + _try_opencv(rot_img):
             parsed = _raw_to_fields(raw)
@@ -581,21 +578,35 @@ def decode_qr(
                     roi_type=rot_name,
                 )
                 return parsed
-    # Step 2: WeChatQR on all 4 rotations only when cheap decoders failed (~1 s total).
+
+    # WeChatQR targeted pass: extract template QR ROIs at 2× and 4× zoom, then
+    # run WeChatQR on each.  WeChatQR fails on the full crop (QR is too small),
+    # but succeeds on zoomed template regions (~4.8 s for 4 rotations × 2 ROIs
+    # × 2 scales × 0.3 s per call).
     for rot_name, rot_img in _fast_rotations:
-        for raw in _try_wechat_qr(rot_img):
-            parsed = _raw_to_fields(raw)
-            if parsed:
-                _log_success(
-                    debug_dir,
-                    track_id=track_id,
-                    timestamp_ms=timestamp_ms,
-                    source="qr_wechat_fast",
-                    raw=raw,
-                    normalized=_success_value(parsed),
-                    roi_type=rot_name,
+        for roi_name, roi in _named_template_rois(rot_img, {"qr"})[:3]:
+            if roi is None or roi.size == 0:
+                continue
+            h_r, w_r = roi.shape[:2]
+            for scale in (2.0, 4.0):
+                zoomed = cv2.resize(
+                    roi,
+                    (max(1, int(w_r * scale)), max(1, int(h_r * scale))),
+                    interpolation=cv2.INTER_CUBIC,
                 )
-                return parsed
+                for raw in _try_wechat_qr(zoomed):
+                    parsed = _raw_to_fields(raw)
+                    if parsed:
+                        _log_success(
+                            debug_dir,
+                            track_id=track_id,
+                            timestamp_ms=timestamp_ms,
+                            source="qr_wechat_roi",
+                            raw=raw,
+                            normalized=_success_value(parsed),
+                            roi_type=f"{rot_name}:{roi_name}:x{scale:.0f}",
+                        )
+                        return parsed
 
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
     for source, img in _named_roi_variants(crop, "qr")[:roi_limit]:
