@@ -234,16 +234,18 @@ def ocr_variants(crop: np.ndarray) -> list[np.ndarray]:
             cv2.filter2D(sr_img, -1, _k),
         ]
 
-    base = preprocess_crop(
-        crop, upscale=2, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
-    )
+    # upscale=1 (native res) is best for small crops from refrigerator-section
+    # videos where Lanczos 2× upscaling hurts PaddleOCR text detection.
+    # upscale=2/3 variants still follow as fallbacks for larger-text crops.
     return [
-        base,
         preprocess_crop(
-            crop, upscale=3, glare=True, deskew=True, sharpen=False, clahe=True, use_sr=False
+            crop, upscale=1, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
         ),
         preprocess_crop(
-            crop, upscale=2, glare=True, deskew=True, sharpen=True, clahe=False, use_sr=False
+            crop, upscale=2, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
+        ),
+        preprocess_crop(
+            crop, upscale=3, glare=True, deskew=True, sharpen=False, clahe=True, use_sr=False
         ),
     ]
 
