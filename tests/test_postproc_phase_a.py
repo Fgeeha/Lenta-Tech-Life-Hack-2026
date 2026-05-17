@@ -19,7 +19,7 @@ def test_defaults_fill_empty():
     out = apply_field_defaults(df)
     assert out.loc[0, "price_discount"] == "нет"
     assert out.loc[0, "wholesale_level_1_count"] == "нет"
-    assert out.loc[0, "additional_info"] == "нет"
+    assert pd.isna(out.loc[0, "additional_info"]) or out.loc[0, "additional_info"] == ""  # P1 field, not filled by P0
     assert out.loc[0, "price_card"] == "129.99"  # must not be overwritten
 
 

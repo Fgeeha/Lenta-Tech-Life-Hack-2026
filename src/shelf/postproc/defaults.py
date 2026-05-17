@@ -11,18 +11,22 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Fields where GT == "нет" in >90% of the 274 annotated tags.
+# Structurally absent fields: always "нет" per Lenta schema spec + sample.csv.
+# Rule: "нет" = field is not applicable for this product category.
+#        ""    = field is applicable but was not decoded (QR/OCR miss).
+# price{1..4}_qr are QR positional slots → stay empty ("") when QR is not decoded.
+# additional_info is template-dependent → handled by P1 abstain policy.
+# wholesale_level_1_count: 100% "нет" in sample.csv; 37% have "2" in labeled GT →
+#   filling with "нет" is correct for sample convention but risky for GT eval.
 _FIELD_DEFAULTS: dict[str, str] = {
+    # Always "нет" regardless of template:
     "price_discount": "нет",
-    "price2_qr": "нет",
-    "price3_qr": "нет",
     "action_price_qr": "нет",
     "action_code_qr": "нет",
     "wholesale_level_1_count": "нет",
     "wholesale_level_1_price": "нет",
     "wholesale_level_2_count": "нет",
     "wholesale_level_2_price": "нет",
-    "additional_info": "нет",
 }
 
 
