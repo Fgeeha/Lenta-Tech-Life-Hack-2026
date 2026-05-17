@@ -252,7 +252,10 @@ def _extract_one(
             qr_fields,
         )
     )
-    merged, _ = optimize_tag(merged, catalog=load_catalog_from_env())
+    _cat = load_catalog_from_env()
+    # apply_catalog handles video-scoped price lookup (when barcode/sku absent)
+    [merged] = apply_catalog([merged], _cat)
+    merged, _ = optimize_tag(merged, catalog=_cat)
     return merged.__dict__
 
 
