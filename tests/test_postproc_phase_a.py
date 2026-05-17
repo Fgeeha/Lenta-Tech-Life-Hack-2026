@@ -90,3 +90,94 @@ def test_empty_dataframe_safe():
     assert len(out) == 0
     out2 = apply_field_derivation(df)
     assert len(out2) == 0
+
+
+# ── Catalog lookup tests ──────────────────────────────────────────────────────
+
+def _make_catalog(entries: list[dict]) -> "Catalog":
+    """Build a minimal in-memory catalog for testing."""
+    from shelf.postproc.catalog import Catalog, CatalogEntry, _merge_catalog_entry
+
+    catalog = Catalog()
+    for e in entries:
+        entry = CatalogEntry(
+            product_name=e.get("product_name", "TestProduct"),
+            barcode=e.get("barcode", ""),
+            id_sku=e.get("id_sku", ""),
+            price_card=e.get("price_card", ""),
+            price_default=e.get("price_default", ""),
+            source_files={e.get("src", "43_15.csv")},
+        )
+        if entry.barcode:
+            catalog.by_barcode[entry.barcode] = _merge_catalog_entry(
+                catalog.by_barcode.get(entry.barcode), entry
+            )
+    return catalog
+
+
+def test_catalog_lookup_exact():
+    cat = _make_catalog([{"barcode": "4690491122587", "product_name": "Widget A"}])
+    entry = cat.lookup(barcode="4690491122587")
+    assert entry is not None
+    assert entry.product_name == "Widget A"
+
+
+def test_catalog_lookup_prefix_fallback_drop_last():
+    # OCR drops last digit: 4690491122587 → 469049112258 (12 digits)
+    cat = _make_catalog([{"barcode": "4690491122587", "product_name": "Widget A"}])
+    entry = cat.lookup(barcode="469049112258")  # substring of catalog barcode
+    assert entry is not None
+    assert entry.product_name == "Widget A"
+
+
+def test_catalog_lookup_prefix_fallback_extra_digit():
+    # OCR adds a spurious digit at end: 4690491122587 → 46904911225870
+    cat = _make_catalog([{"barcode": "4690491122587", "product_name": "Widget A"}])
+    entry = cat.lookup(barcode="46904911225870")  # catalog bc is substring of input
+    assert entry is not None
+    assert entry.product_name == "Widget A"
+
+
+def test_catalog_lookup_prefix_ambiguous_returns_none():
+    # Two barcodes share a common prefix → ambiguous → None
+    cat = _make_catalog([
+        {"barcode": "4690491122587", "product_name": "Widget A"},
+        {"barcode": "4690491122500", "product_name": "Widget B"},
+    ])
+    entry = cat.lookup(barcode="469049112")  # matches both
+    assert entry is None
+
+
+def test_catalog_lookup_prefix_too_short():
+    # Digit run < 8 → skip prefix fallback
+    cat = _make_catalog([{"barcode": "4690491122587", "product_name": "Widget A"}])
+    entry = cat.lookup(barcode="4690491")  # only 7 digits
+    assert entry is None
+
+
+def test_lookup_by_video_price_unique():
+    cat = _make_catalog([
+        {"barcode": "4690491122587", "price_card": "316,99", "price_default": "415,79", "src": "43_15.csv"},
+    ])
+    entry = cat.lookup_by_video_price("316.99", video_hint="43_15")
+    assert entry is not None
+    assert entry.price_default == "415,79"
+
+
+def test_lookup_by_video_price_dual_tiebreaker():
+    # Two products same price_card — dual tiebreaker by price_default
+    cat = _make_catalog([
+        {"barcode": "4690491122587", "price_card": "149,99", "price_default": "189,99", "src": "49_5.csv"},
+        {"barcode": "4606272000180", "price_card": "149,99", "price_default": "299,99", "src": "49_5.csv"},
+    ])
+    # Ambiguous on price_card alone
+    assert cat.lookup_by_video_price("149,99", video_hint="49_5") is None
+    # Resolved by price_default
+    entry = cat.lookup_by_video_price("149,99", price_default="189,99", video_hint="49_5")
+    assert entry is not None
+    assert entry.price_default == "189,99"
+
+
+def test_lookup_by_video_price_empty_hint_returns_none():
+    cat = _make_catalog([{"barcode": "4690491122587", "price_card": "316,99", "src": "43_15.csv"}])
+    assert cat.lookup_by_video_price("316.99", video_hint="") is None

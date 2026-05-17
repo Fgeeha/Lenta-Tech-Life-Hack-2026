@@ -51,7 +51,14 @@ class Catalog:
     def lookup(
         self, *, barcode: str = "", qr_barcode: str = "", sku: str = ""
     ) -> CatalogEntry | None:
-        """Find an entry by valid EAN-13 or strict SKU."""
+        """Find an entry by EAN-13, SKU, or partial-digit fallback.
+
+        Priority:
+        1. Exact EAN-13 (with checksum repair for 12/14-digit inputs)
+        2. Prefix/substring fallback (OCR often drops 1-2 edge digits)
+        3. Exact normalized SKU
+        4. SKU prefix/substring fallback
+        """
         for raw in (qr_barcode, barcode):
             key = normalize_ean13(
                 raw,
@@ -61,37 +68,83 @@ class Catalog:
             )
             if key and key in self.by_barcode:
                 return self.by_barcode[key]
+
+        # Prefix/substring fallback: OCR may produce partial or truncated EAN-13.
+        # Only use when the digit run is >= 8 to avoid false positives.
+        for raw in (qr_barcode, barcode):
+            cleaned = re.sub(r"\D", "", str(raw or ""))
+            if len(cleaned) < 8:
+                continue
+            matches = [
+                bc for bc in self.by_barcode
+                if cleaned in bc or bc in cleaned
+            ]
+            if len(matches) == 1:
+                return self.by_barcode[matches[0]]
+
         sku_key = normalize_sku(sku)
         if sku_key and sku_key in self.by_sku:
             return self.by_sku[sku_key]
+
+        # SKU prefix/substring fallback for partial OCR reads (>= 8 digits).
+        if sku:
+            cleaned_sku = re.sub(r"\D", "", str(sku))
+            if len(cleaned_sku) >= 8:
+                matches = [
+                    s for s in self.by_sku
+                    if cleaned_sku in s or s in cleaned_sku
+                ]
+                if len(matches) == 1:
+                    return self.by_sku[matches[0]]
+
         return None
 
     def lookup_by_video_price(
-        self, price_card: str, video_hint: str = ""
+        self,
+        price_card: str,
+        price_default: str = "",
+        video_hint: str = "",
     ) -> CatalogEntry | None:
         """Find a unique catalog entry matching price_card within one video.
 
-        Requires a non-empty ``video_hint`` (e.g. "43_15") to avoid false
-        positives from cross-video price collisions.  Returns only when
-        exactly one candidate matches.
+        Requires a non-empty ``video_hint`` to avoid false positives.
+        When ``price_card`` alone has collisions, ``price_default`` is used
+        as a tiebreaker (dual-price match).  Returns only when exactly one
+        candidate remains.
         """
         if not video_hint:
-            return None  # All-video search too ambiguous; skip
-        target = _parse_price_float(price_card)
-        if target is None:
             return None
+        target_pc = _parse_price_float(price_card)
+        if target_pc is None:
+            return None
+
         candidates: list[CatalogEntry] = []
         seen_barcodes: set[str] = set()
         for barcode, entry in self.by_barcode.items():
             if barcode in seen_barcodes:
                 continue
-            if video_hint and not any(video_hint in sf for sf in entry.source_files):
+            if not any(video_hint in sf for sf in entry.source_files):
                 continue
             ep = _parse_price_float(entry.price_card)
-            if ep is not None and abs(ep - target) < 1.5:
+            if ep is not None and abs(ep - target_pc) < 1.5:
                 candidates.append(entry)
                 seen_barcodes.add(barcode)
-        return candidates[0] if len(candidates) == 1 else None
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) == 0 or not price_default:
+            return None
+
+        # Tiebreaker: price_default narrows collisions for video 49_5
+        target_pd = _parse_price_float(price_default)
+        if target_pd is None:
+            return None
+        narrowed = [
+            c for c in candidates
+            if (cp := _parse_price_float(c.price_default)) is not None
+            and abs(cp - target_pd) < 1.5
+        ]
+        return narrowed[0] if len(narrowed) == 1 else None
 
     @property
     def size(self) -> int:
@@ -235,10 +288,12 @@ def apply_catalog(
             barcode=tag.barcode, qr_barcode=tag.qr_code_barcode, sku=tag.id_sku
         )
         if entry is None:
-            # Fallback: video-scoped price_card lookup (unique price within one video).
+            # Fallback: video-scoped price lookup (unique price within one video).
             video = _video_hint_from_filename(getattr(tag, "filename", ""))
             entry = catalog.lookup_by_video_price(
-                str(getattr(tag, "price_card", "") or ""), video_hint=video
+                str(getattr(tag, "price_card", "") or ""),
+                price_default=str(getattr(tag, "price_default", "") or ""),
+                video_hint=video,
             )
         if entry is None:
             out.append(tag)
