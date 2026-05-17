@@ -96,7 +96,7 @@ def apply_field_derivation(df: pd.DataFrame) -> pd.DataFrame:
             pd_val = _parse_price(result.at[idx, "price_default"]) if "price_default" in result.columns else None
             if pc is not None and pd_val is not None and pd_val > 0 and pc < pd_val:
                 pct = math.floor((1.0 - pc / pd_val) * 100)
-                result.at[idx, "discount_amount"] = f"{pct}%" if 1 <= pct <= 99 else "нет"
+                result.at[idx, "discount_amount"] = f"-{pct}%" if 1 <= pct <= 99 else "нет"
             else:
                 result.at[idx, "discount_amount"] = "нет"
 

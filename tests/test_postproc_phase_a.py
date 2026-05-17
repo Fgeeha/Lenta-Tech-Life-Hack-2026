@@ -59,7 +59,7 @@ def test_derive_discount_amount_from_prices():
         "price_card": "70", "price_default": "100", "discount_amount": ""
     }])
     out = apply_field_derivation(df)
-    assert out.loc[0, "discount_amount"] == "30%"  # floor((1-70/100)*100)=30
+    assert out.loc[0, "discount_amount"] == "-30%"  # floor((1-70/100)*100)=30, GT format is negative
 
 
 def test_derive_discount_amount_no_discount_when_equal():

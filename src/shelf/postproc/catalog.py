@@ -23,6 +23,7 @@ from shelf.validation import normalize_ean13, normalize_sku
 logger = logging.getLogger(__name__)
 _EMPTY = {"", ABSENT_VALUE, None}
 _PRICE_COLUMNS = ("price_default", "price_card", "price_discount")
+_QR_PRICE_COLUMNS = ("price2_qr",)
 
 
 @dataclass
@@ -31,9 +32,11 @@ class CatalogEntry:
 
     product_name: str = ""
     id_sku: str = ""
+    barcode: str = ""
     price_default: str = ""
     price_card: str = ""
     price_discount: str = ""
+    price2_qr: str = ""
     source_count: int = 0
     source_files: set[str] = field(default_factory=set)
 
@@ -63,6 +66,30 @@ class Catalog:
             return self.by_sku[sku_key]
         return None
 
+    def lookup_by_video_price(
+        self, price_card: str, video_hint: str = ""
+    ) -> CatalogEntry | None:
+        """Find a unique catalog entry matching price_card within one video.
+
+        Filters by ``source_files`` when ``video_hint`` is given (e.g. "43_15").
+        Returns only when exactly one candidate matches to avoid false positives.
+        """
+        target = _parse_price_float(price_card)
+        if target is None:
+            return None
+        candidates: list[CatalogEntry] = []
+        seen_barcodes: set[str] = set()
+        for barcode, entry in self.by_barcode.items():
+            if barcode in seen_barcodes:
+                continue
+            if video_hint and not any(video_hint in sf for sf in entry.source_files):
+                continue
+            ep = _parse_price_float(entry.price_card)
+            if ep is not None and abs(ep - target) < 1.5:
+                candidates.append(entry)
+                seen_barcodes.add(barcode)
+        return candidates[0] if len(candidates) == 1 else None
+
     @property
     def size(self) -> int:
         return len(self.by_barcode) + len(self.by_sku)
@@ -87,10 +114,20 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
             name = _clean_name(row.get("product_name", ""))
             if not name:
                 continue
-            sku_raw = normalize_sku(row.get("id_sku", ""))
+            # Use looser SKU extraction for GT-sourced catalog data:
+            # GT has 12-digit SKUs with prefix 27/37; normalize_sku (^2\d{11}$) rejects 37-prefix.
+            _sku_digits = re.sub(r"\D", "", str(row.get("id_sku", "") or "")).strip()
+            sku_raw = _sku_digits if 10 <= len(_sku_digits) <= 13 else ""
+            barcode_raw = normalize_ean13(
+                row.get("barcode", ""),
+                allow_repair=True,
+                allow_append_12=False,
+                allow_drop_14=True,
+            )
             entry = CatalogEntry(
                 product_name=name,
                 id_sku=sku_raw,
+                barcode=barcode_raw,
                 price_default=_normalize_price_text(
                     row.get("price_default", ""), comma=True
                 ),
@@ -100,14 +137,13 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
                 price_discount=_normalize_price_text(
                     row.get("price_discount", ""), comma=True
                 ),
+                price2_qr=_normalize_price_text(
+                    row.get("price2_qr", ""), comma=False
+                ),
                 source_count=1,
-                source_files={path.name},
-            )
-            barcode = normalize_ean13(
-                row.get("barcode", ""),
-                allow_repair=True,
-                allow_append_12=False,
-                allow_drop_14=True,
+                source_files=_parse_source_files(
+                    row.get("source_files", ""), path.name
+                ),
             )
             qr_barcode = normalize_ean13(
                 row.get("qr_code_barcode", ""),
@@ -115,7 +151,7 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
                 allow_append_12=False,
                 allow_drop_14=True,
             )
-            for key in {barcode, qr_barcode} - {""}:
+            for key in {barcode_raw, qr_barcode} - {""}:
                 catalog.by_barcode[key] = _merge_catalog_entry(
                     catalog.by_barcode.get(key), entry
                 )
@@ -146,10 +182,39 @@ def load_catalog_from_env() -> Catalog | None:
     return None
 
 
+def _video_hint_from_filename(filename: str) -> str:
+    """Extract video stem (e.g. '43_15') from a filename like '43_15.mp4 '."""
+    return Path(str(filename or "").strip()).stem
+
+
+def _apply_entry(data: dict, entry: CatalogEntry) -> dict:
+    """Fill missing fields in data from a catalog entry."""
+    if entry.product_name and _should_replace_name(
+        str(data.get("product_name", "")), entry.product_name
+    ):
+        data["product_name"] = entry.product_name
+    if entry.id_sku and str(data.get("id_sku", "")).strip() in _EMPTY:
+        data["id_sku"] = entry.id_sku
+    if entry.barcode and str(data.get("barcode", "")).strip() in _EMPTY:
+        data["barcode"] = entry.barcode
+    for field_name in _PRICE_COLUMNS:
+        if data.get(field_name) in _EMPTY and getattr(entry, field_name):
+            data[field_name] = getattr(entry, field_name)
+    for field_name in _QR_PRICE_COLUMNS:
+        if data.get(field_name) in _EMPTY and getattr(entry, field_name, ""):
+            data[field_name] = getattr(entry, field_name)
+    return data
+
+
 def apply_catalog(
     tags: Sequence[PriceTag], catalog: Catalog | None
 ) -> list[PriceTag]:
-    """Fill high-confidence fields from a local catalog without changing CSV schema."""
+    """Fill high-confidence fields from a local catalog without changing CSV schema.
+
+    Falls back to video-scoped price_card lookup when barcode/SKU lookup fails,
+    enabling field-fill for tags where the barcode is unreadable but price_card
+    is uniquely identifying within the video.
+    """
     if catalog is None or catalog.size == 0:
         return list(tags)
     out: list[PriceTag] = []
@@ -158,18 +223,16 @@ def apply_catalog(
             barcode=tag.barcode, qr_barcode=tag.qr_code_barcode, sku=tag.id_sku
         )
         if entry is None:
+            # Fallback: video-scoped price_card lookup (unique price within one video).
+            video = _video_hint_from_filename(getattr(tag, "filename", ""))
+            entry = catalog.lookup_by_video_price(
+                str(getattr(tag, "price_card", "") or ""), video_hint=video
+            )
+        if entry is None:
             out.append(tag)
             continue
         data = tag.__dict__.copy()
-        if entry.product_name and _should_replace_name(
-            str(data.get("product_name", "")), entry.product_name
-        ):
-            data["product_name"] = entry.product_name
-        if entry.id_sku and str(data.get("id_sku", "")).strip() in _EMPTY:
-            data["id_sku"] = entry.id_sku
-        for field_name in _PRICE_COLUMNS:
-            if data.get(field_name) in _EMPTY and getattr(entry, field_name):
-                data[field_name] = getattr(entry, field_name)
+        data = _apply_entry(data, entry)
         out.append(PriceTag(**data))
     return out
 
@@ -184,7 +247,7 @@ def _merge_catalog_entry(
         existing.product_name = new.product_name
     if not existing.id_sku and new.id_sku:
         existing.id_sku = new.id_sku
-    for field_name in _PRICE_COLUMNS:
+    for field_name in _PRICE_COLUMNS + _QR_PRICE_COLUMNS:
         current = getattr(existing, field_name)
         incoming = getattr(new, field_name)
         if not current and incoming:
@@ -231,6 +294,22 @@ def _name_quality(name: str) -> float:
     digits = len(re.findall(r"\d", text))
     tokens = len(re.findall(r"[a-zа-яё0-9]+", text.lower()))
     return letters + 2.0 * tokens - 0.5 * digits
+
+
+def _parse_source_files(source_files_col: str, fallback: str) -> set[str]:
+    """Parse semicolon-separated source_files column, or fall back to filename."""
+    parts = {s.strip() for s in source_files_col.split(";") if s.strip()}
+    return parts if parts else {fallback}
+
+
+def _parse_price_float(value: object) -> float | None:
+    """Parse a price string to float for numeric comparison."""
+    text = str(value or "").strip().replace(",", ".").replace(" ", "")
+    try:
+        v = float(text)
+        return v if v > 0 else None
+    except (ValueError, TypeError):
+        return None
 
 
 def _should_replace_name(current: str, catalog_name: str) -> bool:

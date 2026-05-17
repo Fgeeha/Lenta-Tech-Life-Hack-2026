@@ -40,6 +40,7 @@ def main() -> None:
                 "price_default": entry.price_default,
                 "price_card": entry.price_card,
                 "price_discount": entry.price_discount,
+                "price2_qr": entry.price2_qr,
                 "source_count": entry.source_count,
                 "source_files": ";".join(sorted(entry.source_files)),
             }
@@ -53,6 +54,7 @@ def main() -> None:
                 "price_default": entry.price_default,
                 "price_card": entry.price_card,
                 "price_discount": entry.price_discount,
+                "price2_qr": entry.price2_qr,
                 "source_count": entry.source_count,
                 "source_files": ";".join(sorted(entry.source_files)),
             }
