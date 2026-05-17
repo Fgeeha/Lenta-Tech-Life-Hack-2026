@@ -71,9 +71,12 @@ class Catalog:
     ) -> CatalogEntry | None:
         """Find a unique catalog entry matching price_card within one video.
 
-        Filters by ``source_files`` when ``video_hint`` is given (e.g. "43_15").
-        Returns only when exactly one candidate matches to avoid false positives.
+        Requires a non-empty ``video_hint`` (e.g. "43_15") to avoid false
+        positives from cross-video price collisions.  Returns only when
+        exactly one candidate matches.
         """
+        if not video_hint:
+            return None  # All-video search too ambiguous; skip
         target = _parse_price_float(price_card)
         if target is None:
             return None
@@ -162,9 +165,16 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
     return catalog
 
 
+_CATALOG_INSTANCE: Catalog | None = None
+_CATALOG_PATH_LOADED: str = ""
+
+
 def load_catalog_from_env() -> Catalog | None:
-    """Load optional local catalog configured by environment or default path."""
+    """Load optional local catalog (cached per process — re-reads only if path changes)."""
+    global _CATALOG_INSTANCE, _CATALOG_PATH_LOADED
     raw = os.getenv("SHELF_CATALOG_PATH", "data/catalog.csv").strip()
+    if raw == _CATALOG_PATH_LOADED:
+        return _CATALOG_INSTANCE
     if not raw:
         return None
     path = Path(raw)
@@ -176,10 +186,12 @@ def load_catalog_from_env() -> Catalog | None:
     else:
         paths = [path]
     catalog = build_catalog_from_csvs(paths)
-    if catalog.size:
+    result = catalog if catalog.size else None
+    if result:
         logger.info("Loaded local catalog: %d keys from %s", catalog.size, path)
-        return catalog
-    return None
+    _CATALOG_INSTANCE = result
+    _CATALOG_PATH_LOADED = raw
+    return result
 
 
 def _video_hint_from_filename(filename: str) -> str:
