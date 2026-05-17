@@ -589,6 +589,35 @@ def _barcode_roi_variants(crop: np.ndarray) -> list[np.ndarray]:
     return [img for _, img in _named_roi_variants(crop, "barcode")]
 
 
+def _preprocess_for_glare(roi: np.ndarray) -> list[np.ndarray]:
+    """Return glare-resistant variants of a QR ROI for WeChatQR retry.
+
+    Called only after the standard WeChatQR attempt already failed, so the
+    extra latency (2 CLAHE + 1 bilateral pass) only affects undecoded crops.
+    """
+    if roi is None or roi.size == 0:
+        return []
+    variants: list[np.ndarray] = []
+    # CLAHE in LAB — lifts shadow detail and suppresses bright-spot clipping.
+    try:
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        variants.append(
+            cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+        )
+    except Exception:
+        pass
+    # Bilateral filter — reduces glare while preserving QR module edges.
+    try:
+        variants.append(cv2.bilateralFilter(roi, d=9, sigmaColor=75, sigmaSpace=75))
+    except Exception:
+        pass
+    # Inverted image — helps when glare turns dark QR modules white.
+    variants.append(cv2.bitwise_not(roi))
+    return variants
+
+
 def decode_qr_wechat_fast(crop: np.ndarray) -> dict[str, str]:
     """Lightweight WeChatQR scan: 90°CCW rotation + top-right QR zone at 4× zoom.
 
@@ -699,6 +728,36 @@ def decode_qr(
                     roi_type=f"{rot_name}:{roi_name}:x4",
                 )
                 return parsed
+
+    # Step 1b: anti-glare retry — only runs when Step 1 failed.
+    # Applies CLAHE/bilateral/invert to the same QR ROI before giving up.
+    for rot_name, rot_img in _wechat_rotations:
+        rois = _named_template_rois(rot_img, {"qr"})
+        if not rois:
+            continue
+        roi_name, roi = rois[0]
+        if roi is None or roi.size == 0:
+            continue
+        h_r, w_r = roi.shape[:2]
+        for glare_variant in _preprocess_for_glare(roi):
+            zoomed = cv2.resize(
+                glare_variant,
+                (max(1, int(w_r * 4.0)), max(1, int(h_r * 4.0))),
+                interpolation=cv2.INTER_CUBIC,
+            )
+            for raw in _try_wechat_qr(zoomed):
+                parsed = _raw_to_fields(raw)
+                if parsed:
+                    _log_success(
+                        debug_dir,
+                        track_id=track_id,
+                        timestamp_ms=timestamp_ms,
+                        source="qr_wechat_antiglare",
+                        raw=raw,
+                        normalized=_success_value(parsed),
+                        roi_type=f"{rot_name}:{roi_name}:antiglare:x4",
+                    )
+                    return parsed
 
     # Step 2: cheap decoders on full crop (pyzbar reads linear EAN-13 barcode
     # strip; returns only barcode number without price fields).
