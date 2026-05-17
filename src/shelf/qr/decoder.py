@@ -403,6 +403,18 @@ def _get_barcode_detector() -> "cv2.barcode.BarcodeDetector | None":
     return _BARCODE_DETECTOR
 
 
+def _try_zxingcpp(image: np.ndarray) -> list[str]:
+    """Decode barcodes using zxing-cpp (tolerant of blur, rotation, perspective)."""
+    try:
+        import zxingcpp  # type: ignore
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        results = zxingcpp.read_barcodes(gray)
+        return [r.text for r in results if r.valid and r.text]
+    except Exception:
+        return []
+
+
 def _try_opencv_barcode(image: np.ndarray) -> list[str]:
     """Decode linear barcodes using OpenCV BarcodeDetector (more robust than pyzbar on blurry crops)."""
     detector = _get_barcode_detector()
@@ -781,7 +793,7 @@ def decode_barcode(
         return ""
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
     for source, img in _named_roi_variants(crop, "barcode")[:roi_limit]:
-        for raw in _try_pyzbar(img) + _try_opencv_barcode(img):
+        for raw in _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)
@@ -807,7 +819,7 @@ def decode_barcode(
         return ""
     full_limit = _variant_limit(default_full=10_000, default_fast=12)
     for idx, img in enumerate(_image_variants(crop)[:full_limit]):
-        for raw in _try_pyzbar(img) + _try_opencv_barcode(img):
+        for raw in _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)
