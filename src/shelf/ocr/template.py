@@ -16,10 +16,12 @@ import cv2
 import numpy as np
 
 # HSV-диапазоны (оранжевый у Ленты — "red" в GT)
+# Saturation minimum lowered to 40 for red to handle glare-washed crops
+# where the orange-red desaturates but hue stays in 0-25 range.
 _COLOR_RANGES = {
     "red": [
-        {"lo": np.array([0, 80, 60]), "hi": np.array([25, 255, 255])},
-        {"lo": np.array([155, 80, 60]), "hi": np.array([180, 255, 255])},
+        {"lo": np.array([0, 40, 60]), "hi": np.array([25, 255, 255])},
+        {"lo": np.array([155, 40, 60]), "hi": np.array([180, 255, 255])},
     ],
     "yellow": [
         {"lo": np.array([20, 80, 80]), "hi": np.array([45, 255, 255])},
@@ -58,7 +60,7 @@ def classify_color(crop: np.ndarray) -> str:
         if frac > best_frac:
             best_frac = frac
             best_color = color
-    if best_frac >= 0.08:
+    if best_frac >= 0.04:
         return best_color
     v_mean = float(hsv[..., 2].mean())
     return "black" if v_mean < 70 else "white"
