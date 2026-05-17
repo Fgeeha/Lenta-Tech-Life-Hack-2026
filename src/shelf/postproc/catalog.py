@@ -146,6 +146,72 @@ class Catalog:
         ]
         return narrowed[0] if len(narrowed) == 1 else None
 
+    def lookup_by_video_price_and_name(
+        self,
+        price_card: str = "",
+        price_default: str = "",
+        product_name_ocr: str = "",
+        video_hint: str = "",
+    ) -> "CatalogEntry | None":
+        """OCR-only catalog match: price filter + fuzzy name tiebreaker.
+
+        Designed for tags where barcode/QR decode failed but OCR produced at
+        least one price and a partial product name.  Both prices are optional;
+        when only one is available the other is skipped.  Returns an entry only
+        when fuzzy name matching unambiguously picks one candidate (score ≥ 70
+        and gap to second-best ≥ 15 points).
+        """
+        if not video_hint:
+            return None
+        target_pc = _parse_price_float(price_card)
+        target_pd = _parse_price_float(price_default)
+        if target_pc is None and target_pd is None:
+            return None
+
+        candidates: list[CatalogEntry] = []
+        seen: set[str] = set()
+        for bc, entry in self.by_barcode.items():
+            if bc in seen:
+                continue
+            if not any(video_hint in sf for sf in entry.source_files):
+                continue
+            ep_pc = _parse_price_float(entry.price_card)
+            ep_pd = _parse_price_float(entry.price_default)
+            pc_ok = target_pc is None or (
+                ep_pc is not None and abs(ep_pc - target_pc) < 1.5
+            )
+            pd_ok = target_pd is None or (
+                ep_pd is not None and abs(ep_pd - target_pd) < 1.5
+            )
+            if pc_ok and pd_ok:
+                candidates.append(entry)
+                seen.add(bc)
+
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # Fuzzy name tiebreaker — requires a non-trivial OCR name.
+        name_clean = _normalize_name_for_fuzzy(product_name_ocr)
+        if len(name_clean) < 4:
+            return None
+
+        try:
+            from rapidfuzz import fuzz  # type: ignore[import]
+        except ImportError:
+            return None
+
+        scored = [
+            (fuzz.token_set_ratio(name_clean, _normalize_name_for_fuzzy(c.product_name)), c)
+            for c in candidates
+        ]
+        scored.sort(key=lambda x: -x[0])
+        top, second = scored[0][0], (scored[1][0] if len(scored) > 1 else 0)
+        if top >= 70 and (top - second) >= 15:
+            return scored[0][1]
+        return None
+
     @property
     def size(self) -> int:
         return len(self.by_barcode) + len(self.by_sku)
@@ -288,11 +354,18 @@ def apply_catalog(
             barcode=tag.barcode, qr_barcode=tag.qr_code_barcode, sku=tag.id_sku
         )
         if entry is None:
-            # Fallback: video-scoped price lookup (unique price within one video).
             video = _video_hint_from_filename(getattr(tag, "filename", ""))
             entry = catalog.lookup_by_video_price(
                 str(getattr(tag, "price_card", "") or ""),
                 price_default=str(getattr(tag, "price_default", "") or ""),
+                video_hint=video,
+            )
+        if entry is None:
+            video = _video_hint_from_filename(getattr(tag, "filename", ""))
+            entry = catalog.lookup_by_video_price_and_name(
+                price_card=str(getattr(tag, "price_card", "") or ""),
+                price_default=str(getattr(tag, "price_default", "") or ""),
+                product_name_ocr=str(getattr(tag, "product_name", "") or ""),
                 video_hint=video,
             )
         if entry is None:
@@ -377,6 +450,13 @@ def _parse_price_float(value: object) -> float | None:
         return v if v > 0 else None
     except (ValueError, TypeError):
         return None
+
+
+def _normalize_name_for_fuzzy(s: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace for fuzzy matching."""
+    text = (s or "").lower()
+    text = re.sub(r"[^\w\sа-яё]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _should_replace_name(current: str, catalog_name: str) -> bool:

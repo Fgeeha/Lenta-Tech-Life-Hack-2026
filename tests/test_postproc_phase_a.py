@@ -181,3 +181,50 @@ def test_lookup_by_video_price_dual_tiebreaker():
 def test_lookup_by_video_price_empty_hint_returns_none():
     cat = _make_catalog([{"barcode": "4690491122587", "price_card": "316,99", "src": "43_15.csv"}])
     assert cat.lookup_by_video_price("316.99", video_hint="") is None
+
+
+def test_lookup_by_price_and_name_resolves_collision():
+    cat = _make_catalog([
+        {"barcode": "4690000000016", "price_card": "159,99",
+         "product_name": "Молоко Простоквашино 3.2% 1л", "src": "49_5.csv"},
+        {"barcode": "4690000000023", "price_card": "159,99",
+         "product_name": "Кефир Домик в деревне 2.5% 1л", "src": "49_5.csv"},
+        {"barcode": "4690000000030", "price_card": "159,99",
+         "product_name": "Йогурт Активиа 290г", "src": "49_5.csv"},
+    ])
+    # Without name — 3 candidates, ambiguous
+    assert cat.lookup_by_video_price_and_name(
+        price_card="159.99", video_hint="49_5") is None
+    # With distinctive name — resolves to one entry
+    entry = cat.lookup_by_video_price_and_name(
+        price_card="159.99",
+        product_name_ocr="Молоко Простоквашино",
+        video_hint="49_5")
+    assert entry is not None
+    assert "Простоквашино" in entry.product_name
+
+
+def test_lookup_by_price_and_name_rejects_weak_match():
+    # Both candidates are "Молоко X.X%" — OCR name "молоко 3 2" scores similarly
+    cat = _make_catalog([
+        {"barcode": "4690000000016", "price_card": "159,99",
+         "product_name": "Молоко Простоквашино 3.2% 1л", "src": "49_5.csv"},
+        {"barcode": "4690000000023", "price_card": "159,99",
+         "product_name": "Молоко Домик в деревне 3.2% 1л", "src": "49_5.csv"},
+    ])
+    entry = cat.lookup_by_video_price_and_name(
+        price_card="159.99",
+        product_name_ocr="молоко 3 2",
+        video_hint="49_5")
+    assert entry is None
+
+
+def test_lookup_by_price_and_name_requires_video():
+    cat = _make_catalog([
+        {"barcode": "4690000000016", "price_card": "159,99",
+         "product_name": "Молоко Простоквашино 3.2% 1л", "src": "49_5.csv"},
+    ])
+    assert cat.lookup_by_video_price_and_name(
+        price_card="159.99",
+        product_name_ocr="Простоквашино",
+        video_hint="") is None
