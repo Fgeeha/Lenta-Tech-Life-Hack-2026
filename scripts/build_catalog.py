@@ -41,6 +41,10 @@ def main() -> None:
                 "price_card": entry.price_card,
                 "price_discount": entry.price_discount,
                 "price2_qr": entry.price2_qr,
+                "special_symbols": entry.special_symbols,
+                "code": entry.code,
+                "print_datetime": entry.print_datetime,
+                "additional_info": entry.additional_info,
                 "source_count": entry.source_count,
                 "source_files": ";".join(sorted(entry.source_files)),
             }
@@ -55,6 +59,10 @@ def main() -> None:
                 "price_card": entry.price_card,
                 "price_discount": entry.price_discount,
                 "price2_qr": entry.price2_qr,
+                "special_symbols": entry.special_symbols,
+                "code": entry.code,
+                "print_datetime": entry.print_datetime,
+                "additional_info": entry.additional_info,
                 "source_count": entry.source_count,
                 "source_files": ";".join(sorted(entry.source_files)),
             }

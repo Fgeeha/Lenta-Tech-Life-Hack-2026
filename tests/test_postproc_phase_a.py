@@ -228,3 +228,104 @@ def test_lookup_by_price_and_name_requires_video():
         price_card="159.99",
         product_name_ocr="Простоквашино",
         video_hint="") is None
+
+
+# ── Fix #1: force_prices on exact barcode match ───────────────────────────────
+
+def _make_catalog_full(entries: list[dict]) -> "Catalog":
+    """Build catalog with all new fields for testing."""
+    from shelf.postproc.catalog import Catalog, CatalogEntry, _merge_catalog_entry
+
+    catalog = Catalog()
+    for e in entries:
+        entry = CatalogEntry(
+            product_name=e.get("product_name", "TestProduct"),
+            barcode=e.get("barcode", ""),
+            id_sku=e.get("id_sku", ""),
+            price_card=e.get("price_card", ""),
+            price_default=e.get("price_default", ""),
+            special_symbols=e.get("special_symbols", ""),
+            code=e.get("code", ""),
+            print_datetime=e.get("print_datetime", ""),
+            additional_info=e.get("additional_info", ""),
+            source_files={e.get("src", "43_15.csv")},
+        )
+        if entry.barcode:
+            catalog.by_barcode[entry.barcode] = _merge_catalog_entry(
+                catalog.by_barcode.get(entry.barcode), entry
+            )
+    return catalog
+
+
+def test_force_prices_overwrites_wrong_ocr_on_exact_barcode_match():
+    from shelf.postproc.catalog import apply_catalog
+    from shelf.schema import PriceTag
+
+    cat = _make_catalog_full([{
+        "barcode": "4690491122587",
+        "price_card": "316,99",
+        "price_default": "415,79",
+    }])
+    tag = PriceTag(barcode="4690491122587", price_card="999,00", price_default="111,00")
+    [result] = apply_catalog([tag], cat)
+    assert result.price_card == "316,99"
+    assert result.price_default == "415,79"
+
+
+def test_no_force_prices_on_price_based_lookup():
+    from shelf.postproc.catalog import apply_catalog
+    from shelf.schema import PriceTag
+
+    cat = _make_catalog_full([{
+        "barcode": "4690491122587",
+        "price_card": "316,99",
+        "price_default": "415,79",
+        "src": "43_15.csv",
+    }])
+    # No barcode — falls back to price-based lookup: should NOT overwrite price_default
+    tag = PriceTag(filename="43_15.mp4", barcode="", price_card="316,99", price_default="111,00")
+    [result] = apply_catalog([tag], cat)
+    assert result.price_default == "111,00"
+
+
+# ── New catalog fields: special_symbols, code, print_datetime, additional_info ─
+
+def test_catalog_fills_special_symbols_from_entry():
+    from shelf.postproc.catalog import apply_catalog
+    from shelf.schema import PriceTag
+
+    cat = _make_catalog_full([{
+        "barcode": "4690491122587",
+        "special_symbols": "К",
+        "code": "13_043015",
+        "print_datetime": "04.01.2026 2:00",
+        "additional_info": "нет",
+    }])
+    tag = PriceTag(barcode="4690491122587")
+    [result] = apply_catalog([tag], cat)
+    assert result.special_symbols == "К"
+    assert result.code == "13_043015"
+    assert result.print_datetime == "04.01.2026 2:00"
+
+
+def test_catalog_does_not_overwrite_existing_code():
+    from shelf.postproc.catalog import apply_catalog
+    from shelf.schema import PriceTag
+
+    cat = _make_catalog_full([{
+        "barcode": "4690491122587",
+        "code": "13_043015",
+    }])
+    tag = PriceTag(barcode="4690491122587", code="ALREADY_SET")
+    [result] = apply_catalog([tag], cat)
+    assert result.code == "ALREADY_SET"
+
+
+def test_clean_symbol_normalises_latin_k():
+    from shelf.postproc.catalog import _clean_symbol
+
+    assert _clean_symbol("K") == "К"      # Latin K → Cyrillic К
+    assert _clean_symbol("К ") == "К"     # trailing space stripped
+    assert _clean_symbol("Ш") == "Ш"
+    assert _clean_symbol("нет") == "нет"
+    assert _clean_symbol("xyz") == ""

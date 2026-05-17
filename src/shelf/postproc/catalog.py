@@ -37,6 +37,10 @@ class CatalogEntry:
     price_card: str = ""
     price_discount: str = ""
     price2_qr: str = ""
+    special_symbols: str = ""
+    code: str = ""
+    print_datetime: str = ""
+    additional_info: str = ""
     source_count: int = 0
     source_files: set[str] = field(default_factory=set)
 
@@ -262,6 +266,12 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
                 price2_qr=_normalize_price_text(
                     row.get("price2_qr", ""), comma=False
                 ),
+                special_symbols=_clean_symbol(row.get("special_symbols", "")),
+                code=str(row.get("code", "") or "").strip(),
+                print_datetime=str(row.get("print_datetime", "") or "").strip(),
+                additional_info=_clean_additional_info(
+                    row.get("additional_info", "")
+                ),
                 source_count=1,
                 source_files=_parse_source_files(
                     row.get("source_files", ""), path.name
@@ -318,8 +328,18 @@ def _video_hint_from_filename(filename: str) -> str:
     return Path(str(filename or "").strip()).stem
 
 
-def _apply_entry(data: dict, entry: CatalogEntry) -> dict:
-    """Fill missing fields in data from a catalog entry."""
+_CATALOG_TEXT_FIELDS = ("special_symbols", "code", "print_datetime", "additional_info")
+
+
+def _apply_entry(
+    data: dict, entry: CatalogEntry, *, force_prices: bool = False
+) -> dict:
+    """Fill missing fields in data from a catalog entry.
+
+    When ``force_prices`` is True (exact barcode/SKU match), catalog prices
+    overwrite OCR values because the catalog is the authoritative source for
+    a positively identified product.
+    """
     if entry.product_name and _should_replace_name(
         str(data.get("product_name", "")), entry.product_name
     ):
@@ -329,11 +349,19 @@ def _apply_entry(data: dict, entry: CatalogEntry) -> dict:
     if entry.barcode and str(data.get("barcode", "")).strip() in _EMPTY:
         data["barcode"] = entry.barcode
     for field_name in _PRICE_COLUMNS:
-        if data.get(field_name) in _EMPTY and getattr(entry, field_name):
-            data[field_name] = getattr(entry, field_name)
+        cat_val = getattr(entry, field_name, "")
+        if not cat_val:
+            continue
+        if force_prices or data.get(field_name) in _EMPTY:
+            data[field_name] = cat_val
     for field_name in _QR_PRICE_COLUMNS:
         if data.get(field_name) in _EMPTY and getattr(entry, field_name, ""):
             data[field_name] = getattr(entry, field_name)
+    # Fill metadata fields only when missing.
+    for field_name in _CATALOG_TEXT_FIELDS:
+        val = getattr(entry, field_name, "")
+        if val and str(data.get(field_name, "") or "").strip() in _EMPTY:
+            data[field_name] = val
     return data
 
 
@@ -353,6 +381,7 @@ def apply_catalog(
         entry = catalog.lookup(
             barcode=tag.barcode, qr_barcode=tag.qr_code_barcode, sku=tag.id_sku
         )
+        exact_match = entry is not None
         if entry is None:
             video = _video_hint_from_filename(getattr(tag, "filename", ""))
             entry = catalog.lookup_by_video_price(
@@ -372,7 +401,7 @@ def apply_catalog(
             out.append(tag)
             continue
         data = tag.__dict__.copy()
-        data = _apply_entry(data, entry)
+        data = _apply_entry(data, entry, force_prices=exact_match)
         out.append(PriceTag(**data))
     return out
 
@@ -394,6 +423,14 @@ def _merge_catalog_entry(
             setattr(existing, field_name, incoming)
         elif current and incoming and current != incoming:
             # Conflicting prices are not safe catalog facts.
+            setattr(existing, field_name, "")
+    # Metadata fields: keep first non-empty; clear on conflict.
+    for field_name in _CATALOG_TEXT_FIELDS:
+        current = getattr(existing, field_name, "")
+        incoming = getattr(new, field_name, "")
+        if not current and incoming:
+            setattr(existing, field_name, incoming)
+        elif current and incoming and current != incoming:
             setattr(existing, field_name, "")
     existing.source_count += new.source_count
     existing.source_files.update(new.source_files)
@@ -457,6 +494,34 @@ def _normalize_name_for_fuzzy(s: str) -> str:
     text = (s or "").lower()
     text = re.sub(r"[^\w\sа-яё]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+_VALID_SYMBOLS = {"К", "Ш", "нет", ""}
+
+
+def _clean_symbol(value: object) -> str:
+    """Normalise special_symbols: accept only К / Ш / нет."""
+    text = str(value or "").strip()
+    if text in _VALID_SYMBOLS:
+        return text
+    # Handle case variants and Latin lookalikes from OCR/CSV.
+    upper = text.upper()
+    if upper in {"К", "K"}:      # Cyrillic К or Latin K
+        return "К"
+    if upper == "Ш":
+        return "Ш"
+    lower = text.lower()
+    if lower in {"нет", "net", "no"}:
+        return "нет"
+    return ""
+
+
+def _clean_additional_info(value: object) -> str:
+    """Strip noise from additional_info; keep нет and real text, drop nan/empty."""
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", ""}:
+        return ""
+    return text
 
 
 def _should_replace_name(current: str, catalog_name: str) -> bool:

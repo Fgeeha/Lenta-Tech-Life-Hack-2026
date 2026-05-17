@@ -85,6 +85,14 @@ EVAL_FIELDS_NO_QR = [
     field for field in EVAL_FIELDS_FULL if field not in QR_EVAL_FIELDS
 ]
 
+# All 23 value fields (mirrors eval_on_labeled.py ALL_VALUE_FIELDS).
+# Threshold: math.ceil(0.80 * 23) = 19 correct fields to PASS.
+ALL_VALUE_FIELDS = [
+    c
+    for c in OUTPUT_COLUMNS
+    if c not in {"filename", "frame_timestamp", "x_min", "y_min", "x_max", "y_max"}
+]
+
 # Для обратной совместимости старого вывода field_accuracy
 EVAL_FIELDS = EVAL_FIELDS_FULL
 
@@ -274,9 +282,11 @@ def eval_video(
     scores_no_qr: list[float] = []
     scores_no_qr_has_qr_gt: list[float] = []
     scores_no_qr_no_qr_gt: list[float] = []
+    scores_all: list[float] = []
 
     field_hits: dict[str, int] = {f: 0 for f in EVAL_FIELDS_FULL}
     field_hits_no_qr: dict[str, int] = {f: 0 for f in EVAL_FIELDS_NO_QR}
+    field_hits_all: dict[str, int] = {f: 0 for f in ALL_VALUE_FIELDS}
     fill_hits: dict[str, int] = {f: 0 for f in OUTPUT_COLUMNS}
 
     barcode_count = 0
@@ -292,6 +302,7 @@ def eval_video(
         if not ret:
             scores_full.append(0.0)
             scores_no_qr.append(0.0)
+            scores_all.append(0.0)
 
             if _gt_has_qr(gt_row):
                 gt_has_qr_count += 1
@@ -378,6 +389,14 @@ def eval_video(
             ):
                 field_hits_no_qr[field] += 1
 
+        score_all, _ = _score_fields(pred, gt_row, ALL_VALUE_FIELDS)
+        scores_all.append(score_all)
+        for field in ALL_VALUE_FIELDS:
+            if _field_match(
+                pred.get(field, ""), gt_row.get(field, ""), field=field
+            ):
+                field_hits_all[field] += 1
+
         if _gt_has_qr(gt_row):
             gt_has_qr_count += 1
             scores_no_qr_has_qr_gt.append(score_no_qr)
@@ -393,6 +412,7 @@ def eval_video(
     n_pass_no_qr = sum(1 for s in scores_no_qr if s >= 0.80)
     n_pass_no_qr_has_qr_gt = sum(1 for s in scores_no_qr_has_qr_gt if s >= 0.80)
     n_pass_no_qr_no_qr_gt = sum(1 for s in scores_no_qr_no_qr_gt if s >= 0.80)
+    n_pass_all = sum(1 for s in scores_all if s >= 0.80)
 
     return {
         "video": name,
@@ -427,6 +447,12 @@ def eval_video(
         "field_accuracy_no_qr": {
             f: field_hits_no_qr[f] / max(1, n_total) for f in EVAL_FIELDS_NO_QR
         },
+        "n_pass_all": n_pass_all,
+        "metric_all": n_pass_all / max(1, n_total),
+        "avg_field_all": sum(scores_all) / max(1, len(scores_all)),
+        "field_accuracy_all": {
+            f: field_hits_all[f] / max(1, n_total) for f in ALL_VALUE_FIELDS
+        },
         "fill_rates": {
             f: fill_hits[f] / max(1, n_total) for f in OUTPUT_COLUMNS
         },
@@ -447,10 +473,22 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     )
     total_pass_no_qr_no_qr_gt = sum(r["n_pass_no_qr_no_qr_gt"] for r in results)
 
+    total_pass_all = sum(r["n_pass_all"] for r in results)
+
     return {
         "videos": results,
         "overall": {
             "n_gt": total_gt,
+            # ALL_VALUE metric (23 fields, ≥19/23 to pass)
+            "metric_80_all": total_pass_all / max(1, total_gt),
+            "avg_field_all": sum(r["avg_field_all"] * r["n_gt"] for r in results)
+            / max(1, total_gt),
+            "n_pass_all": total_pass_all,
+            "field_accuracy_all": {
+                f: sum(r["field_accuracy_all"][f] * r["n_gt"] for r in results)
+                / max(1, total_gt)
+                for f in ALL_VALUE_FIELDS
+            },
             # Full metric
             "metric_80": total_pass / max(1, total_gt),
             "avg_field": sum(r["avg_field"] * r["n_gt"] for r in results)
@@ -518,6 +556,11 @@ def print_summary(summary: dict[str, Any]) -> None:
     o = summary["overall"]
 
     print("\n=== OVERALL ===")
+    print(
+        f"  ALL-VALUE metric@80%={o['metric_80_all']:.3f}  "
+        f"avg_field={o['avg_field_all']:.3f}  "
+        f"pass={o['n_pass_all']}/{o['n_gt']}  (23 fields)"
+    )
     print(
         f"  FULL      metric@80%={o['metric_80']:.3f}  "
         f"avg_field={o['avg_field']:.3f}  "
