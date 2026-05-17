@@ -1,0 +1,47 @@
+{
+  "n_crops": 30,
+  "variants": {
+    "baseline": {
+      "n_boxes_total": 40,
+      "price_found": 16,
+      "price_correct": 9,
+      "n_zero_boxes": 14
+    },
+    "upscale_2x": {
+      "n_boxes_total": 37,
+      "price_found": 12,
+      "price_correct": 6,
+      "n_zero_boxes": 18
+    },
+    "upscale_3x": {
+      "n_boxes_total": 40,
+      "price_found": 14,
+      "price_correct": 9,
+      "n_zero_boxes": 16
+    },
+    "clahe": {
+      "n_boxes_total": 34,
+      "price_found": 13,
+      "price_correct": 7,
+      "n_zero_boxes": 17
+    },
+    "sharpen": {
+      "n_boxes_total": 32,
+      "price_found": 13,
+      "price_correct": 7,
+      "n_zero_boxes": 17
+    },
+    "denoise": {
+      "n_boxes_total": 42,
+      "price_found": 15,
+      "price_correct": 10,
+      "n_zero_boxes": 15
+    },
+    "upscale2x_clahe": {
+      "n_boxes_total": 34,
+      "price_found": 13,
+      "price_correct": 7,
+      "n_zero_boxes": 16
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "baseline (current)": {
+    "zero_boxes": 7,
+    "found": 3,
+    "correct": 3,
+    "total": 10,
+    "correct_pct": 30.0
+  },
+  "angle_cls=True": {
+    "zero_boxes": 7,
+    "found": 3,
+    "correct": 3,
+    "total": 10,
+    "correct_pct": 30.0
+  },
+  "low_thresh": {
+    "zero_boxes": 7,
+    "found": 3,
+    "correct": 3,
+    "total": 10,
+    "correct_pct": 30.0
+  },
+  "angle+low_thresh": {
+    "zero_boxes": 7,
+    "found": 3,
+    "correct": 3,
+    "total": 10,
+    "correct_pct": 30.0
+  },
+  "chinese model": {
+    "zero_boxes": 9,
+    "found": 0,
+    "correct": 0,
+    "total": 10,
+    "correct_pct": 0.0
+  },
+  "ch+angle+low": {
+    "zero_boxes": 10,
+    "found": 0,
+    "correct": 0,
+    "total": 10,
+    "correct_pct": 0.0
+  }
+}
