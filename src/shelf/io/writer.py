@@ -9,6 +9,9 @@ import pandas as pd
 
 from shelf.schema import COLUMN_ALIASES, OUTPUT_COLUMNS, PriceTag
 
+# Bbox fields output as float with 1 decimal place to match sample.csv.
+_BBOX_COLS = frozenset({"x_min", "y_min", "x_max", "y_max"})
+
 # Price-like fields where comma decimal separator must become dot in the submission.
 # discount_amount ("-23%") and product_name ("Молоко, 1л") are intentionally excluded.
 _PRICE_COLS = frozenset({
@@ -23,6 +26,16 @@ _PRICE_COLS = frozenset({
     "wholesale_level_2_price",
     "action_price_qr",
 })
+
+
+def _format_bbox_coord(value: object) -> str:
+    """Format bbox coordinate as float with 1 decimal place to match sample.csv."""
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):.1f}"
+    except (ValueError, TypeError):
+        return str(value)
 
 
 def _dot_price(value: object) -> str:
@@ -62,9 +75,9 @@ def prepare_output_dataframe(
     df = df[OUTPUT_COLUMNS].copy()
     df = df.fillna("")
 
-    # Keep bbox/timestamp numeric if possible; all other fields should remain strings.
+    # frame_timestamp stays numeric (formatted later); bbox cols formatted via _format_bbox_coord.
     for col in OUTPUT_COLUMNS:
-        if col not in {"frame_timestamp", "x_min", "y_min", "x_max", "y_max"}:
+        if col not in {"frame_timestamp"}:
             df[col] = (
                 df[col].astype(str).str.strip().replace({"nan": "", "None": ""})
             )
@@ -73,6 +86,11 @@ def prepare_output_dataframe(
     for col in _PRICE_COLS:
         if col in df.columns:
             df[col] = df[col].apply(_dot_price)
+
+    # Bbox coords: format as float with 1 decimal place to match sample.csv.
+    for col in _BBOX_COLS:
+        if col in df.columns:
+            df[col] = df[col].apply(_format_bbox_coord)
 
     # frame_timestamp: write as integer ms (no trailing .0) to match sample.csv.
     if "frame_timestamp" in df.columns:

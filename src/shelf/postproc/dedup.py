@@ -46,8 +46,8 @@ def deduplicate_tags(
         key=lambda t: (
             str(t.filename),
             float(t.frame_timestamp or 0),
-            int(t.y_min or 0),
-            int(t.x_min or 0),
+            float(t.y_min or 0),
+            float(t.x_min or 0),
         )
     )
     return result
@@ -140,12 +140,12 @@ def _norm_text(text: str) -> str:
 
 
 def _iou(a: PriceTag, b: PriceTag) -> float:
-    ax1, ay1, ax2, ay2 = int(a.x_min), int(a.y_min), int(a.x_max), int(a.y_max)
-    bx1, by1, bx2, by2 = int(b.x_min), int(b.y_min), int(b.x_max), int(b.y_max)
-    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
-    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+    ax1, ay1, ax2, ay2 = float(a.x_min), float(a.y_min), float(a.x_max), float(a.y_max)
+    bx1, by1, bx2, by2 = float(b.x_min), float(b.y_min), float(b.x_max), float(b.y_max)
+    inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
     inter = inter_w * inter_h
-    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
     union = area_a + area_b - inter
     return inter / union if union else 0.0

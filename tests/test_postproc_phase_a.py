@@ -372,3 +372,55 @@ def test_prepare_output_leaves_discount_amount_unchanged():
     tag = PriceTag(discount_amount="-23%")
     df = prepare_output_dataframe([tag])
     assert df.loc[0, "discount_amount"] == "-23%"
+
+
+# ── Bbox float precision ──────────────────────────────────────────────────────
+
+def test_detection_preserves_float_precision():
+    from shelf.detect.detector import Detection
+    det = Detection(
+        x_min=2011.85, y_min=1923.3, x_max=2231.6, y_max=2115.3,
+        confidence=0.9, cls_name="tag"
+    )
+    assert det.x_min == 2011.85
+    clipped = det.clipped(width=4000, height=3000)
+    assert clipped.x_min == 2011.85
+    assert clipped.y_min == 1923.3
+
+
+def test_detection_area_is_int():
+    from shelf.detect.detector import Detection
+    det = Detection(x_min=10.3, y_min=20.7, x_max=110.8, y_max=120.9, confidence=0.5)
+    assert isinstance(det.area, int)
+    assert det.area == 100 * 100  # int(110.8-10.3) * int(120.9-20.7) = 100*100
+
+
+def test_format_bbox_coord():
+    from shelf.io.writer import _format_bbox_coord
+    assert _format_bbox_coord(2011.9) == "2011.9"   # exact sample.csv value
+    assert _format_bbox_coord(2011.0) == "2011.0"
+    assert _format_bbox_coord(2011) == "2011.0"
+    assert _format_bbox_coord("1923.3") == "1923.3"
+    assert _format_bbox_coord(None) == ""
+    assert _format_bbox_coord("") == ""
+    assert _format_bbox_coord(0) == "0.0"
+
+
+def test_prepare_output_formats_bbox_as_float():
+    from shelf.io.writer import prepare_output_dataframe
+    from shelf.schema import PriceTag
+    # Use exact values from sample.csv format specification
+    tag = PriceTag(x_min=2011.9, y_min=1923.3, x_max=2231.6, y_max=2115.3)
+    df = prepare_output_dataframe([tag])
+    assert df.loc[0, "x_min"] == "2011.9"
+    assert df.loc[0, "y_min"] == "1923.3"
+    assert df.loc[0, "x_max"] == "2231.6"
+    assert df.loc[0, "y_max"] == "2115.3"
+
+
+def test_prepare_output_bbox_integer_input():
+    from shelf.io.writer import prepare_output_dataframe
+    from shelf.schema import PriceTag
+    tag = PriceTag(x_min=2011.0, y_min=1923.0, x_max=2231.0, y_max=2115.0)
+    df = prepare_output_dataframe([tag])
+    assert df.loc[0, "x_min"] == "2011.0"
