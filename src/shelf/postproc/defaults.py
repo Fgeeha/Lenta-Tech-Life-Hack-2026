@@ -3,6 +3,7 @@
 Many GT fields are "нет" in >90% cases. After OCR/QR we fill remaining
 empty fields with sensible defaults — never overwriting successful OCR/QR.
 """
+
 from __future__ import annotations
 
 import logging
@@ -53,5 +54,10 @@ def apply_field_defaults(df: pd.DataFrame) -> pd.DataFrame:
         if filled:
             result[field] = result[field].astype(object)
             result.loc[mask, field] = default
-            logger.debug("defaults: filled %d rows field=%r value=%r", filled, field, default)
+            logger.debug(
+                "defaults: filled %d rows field=%r value=%r",
+                filled,
+                field,
+                default,
+            )
     return result

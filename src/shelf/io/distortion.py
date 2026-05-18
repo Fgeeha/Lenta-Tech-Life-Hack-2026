@@ -43,7 +43,9 @@ class DistortionCorrector:
         w_mm = aspect * h_mm
         fx = _FOCAL_MM * _W / w_mm
         fy = _FOCAL_MM * _H / h_mm
-        self._K = np.array([[fx, 0, _W / 2], [0, fy, _H / 2], [0, 0, 1]], dtype=np.float32)
+        self._K = np.array(
+            [[fx, 0, _W / 2], [0, fy, _H / 2], [0, 0, 1]], dtype=np.float32
+        )
         self._dist = np.array(_DIST_COEFFS, dtype=np.float32)
 
         self._new_K, self._roi = cv2.getOptimalNewCameraMatrix(
@@ -58,7 +60,9 @@ class DistortionCorrector:
 
     def _cached_remap(self, frame: np.ndarray, frame_id: int) -> np.ndarray:
         if self._cache_id != frame_id:
-            self._cache_frame = cv2.remap(frame, self._map1, self._map2, cv2.INTER_LINEAR)
+            self._cache_frame = cv2.remap(
+                frame, self._map1, self._map2, cv2.INTER_LINEAR
+            )
             self._cache_id = frame_id
         return self._cache_frame  # type: ignore[return-value]
 
@@ -110,7 +114,9 @@ class DistortionCorrector:
         return undist[y : y + h, x : x + w]
 
     # Legacy compat
-    def get_undistorted_frame(self, frame: np.ndarray, frame_id: int) -> np.ndarray:
+    def get_undistorted_frame(
+        self, frame: np.ndarray, frame_id: int
+    ) -> np.ndarray:
         return self._cached_remap(frame, frame_id)
 
 

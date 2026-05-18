@@ -231,8 +231,10 @@ def run(
         if undistort_ocr_enabled_for_filename(filename):
             _corr = get_corrector()
             _fid = frame_count
+
             def _crop_fn(f, bbox, _corr=_corr, _fid=_fid):
                 return _corr.undistort_crop_at_orig_bbox(f, bbox, frame_id=_fid)
+
             tracker.update(dets, frame, ts_ms, crop_fn=_crop_fn)
         else:
             tracker.update(dets, frame, ts_ms)
@@ -361,7 +363,9 @@ def run(
                 if extra_qr:
                     best = merge(best, extra_qr)
                     logger.info(
-                        "QR fallback decoded for track %d at %.0fms", tid, state.best_qr_ts
+                        "QR fallback decoded for track %d at %.0fms",
+                        tid,
+                        state.best_qr_ts,
                     )
 
         tags.append(best)

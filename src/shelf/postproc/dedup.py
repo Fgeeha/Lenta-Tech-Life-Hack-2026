@@ -140,8 +140,18 @@ def _norm_text(text: str) -> str:
 
 
 def _iou(a: PriceTag, b: PriceTag) -> float:
-    ax1, ay1, ax2, ay2 = float(a.x_min), float(a.y_min), float(a.x_max), float(a.y_max)
-    bx1, by1, bx2, by2 = float(b.x_min), float(b.y_min), float(b.x_max), float(b.y_max)
+    ax1, ay1, ax2, ay2 = (
+        float(a.x_min),
+        float(a.y_min),
+        float(a.x_max),
+        float(a.y_max),
+    )
+    bx1, by1, bx2, by2 = (
+        float(b.x_min),
+        float(b.y_min),
+        float(b.x_max),
+        float(b.y_max),
+    )
     inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
     inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
     inter = inter_w * inter_h

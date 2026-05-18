@@ -80,8 +80,7 @@ class Catalog:
             if len(cleaned) < 8:
                 continue
             matches = [
-                bc for bc in self.by_barcode
-                if cleaned in bc or bc in cleaned
+                bc for bc in self.by_barcode if cleaned in bc or bc in cleaned
             ]
             if len(matches) == 1:
                 return self.by_barcode[matches[0]]
@@ -95,7 +94,8 @@ class Catalog:
             cleaned_sku = re.sub(r"\D", "", str(sku))
             if len(cleaned_sku) >= 8:
                 matches = [
-                    s for s in self.by_sku
+                    s
+                    for s in self.by_sku
                     if cleaned_sku in s or s in cleaned_sku
                 ]
                 if len(matches) == 1:
@@ -144,7 +144,8 @@ class Catalog:
         if target_pd is None:
             return None
         narrowed = [
-            c for c in candidates
+            c
+            for c in candidates
             if (cp := _parse_price_float(c.price_default)) is not None
             and abs(cp - target_pd) < 1.5
         ]
@@ -207,7 +208,12 @@ class Catalog:
             return None
 
         scored = [
-            (fuzz.token_set_ratio(name_clean, _normalize_name_for_fuzzy(c.product_name)), c)
+            (
+                fuzz.token_set_ratio(
+                    name_clean, _normalize_name_for_fuzzy(c.product_name)
+                ),
+                c,
+            )
             for c in candidates
         ]
         scored.sort(key=lambda x: -x[0])
@@ -280,7 +286,9 @@ def build_catalog_from_csvs(paths: Iterable[str | Path]) -> Catalog:
                 continue
             # Use looser SKU extraction for GT-sourced catalog data:
             # GT has 12-digit SKUs with prefix 27/37; normalize_sku (^2\d{11}$) rejects 37-prefix.
-            _sku_digits = re.sub(r"\D", "", str(row.get("id_sku", "") or "")).strip()
+            _sku_digits = re.sub(
+                r"\D", "", str(row.get("id_sku", "") or "")
+            ).strip()
             sku_raw = _sku_digits if 10 <= len(_sku_digits) <= 13 else ""
             barcode_raw = normalize_ean13(
                 row.get("barcode", ""),
@@ -366,7 +374,12 @@ def _video_hint_from_filename(filename: str) -> str:
     return Path(str(filename or "").strip()).stem
 
 
-_CATALOG_TEXT_FIELDS = ("special_symbols", "code", "print_datetime", "additional_info")
+_CATALOG_TEXT_FIELDS = (
+    "special_symbols",
+    "code",
+    "print_datetime",
+    "additional_info",
+)
 
 
 def _apply_entry(
@@ -560,7 +573,7 @@ def _clean_symbol(value: object) -> str:
         return text
     # Handle case variants and Latin lookalikes from OCR/CSV.
     upper = text.upper()
-    if upper in {"К", "K"}:      # Cyrillic К or Latin K
+    if upper in {"К", "K"}:  # Cyrillic К or Latin K
         return "К"
     if upper == "Ш":
         return "Ш"

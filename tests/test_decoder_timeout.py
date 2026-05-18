@@ -10,7 +10,9 @@ import pytest
 import shelf.qr.decoder as decoder
 
 
-@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGALRM"), reason="SIGALRM not available")
+@pytest.mark.skipif(
+    not hasattr(__import__("signal"), "SIGALRM"), reason="SIGALRM not available"
+)
 def test_wechat_qr_timeout_returns_empty(monkeypatch):
     """When WeChatQR hangs longer than timeout, _try_wechat_qr returns [] without crash."""
     mock_reader = MagicMock()
@@ -35,7 +37,9 @@ def test_wechat_qr_timeout_returns_empty(monkeypatch):
 def test_wechat_qr_normal_decode_works(monkeypatch):
     """Fast successful decode returns result without triggering timeout."""
     mock_reader = MagicMock()
-    mock_reader.detectAndDecode = MagicMock(return_value=(["test_payload"], None))
+    mock_reader.detectAndDecode = MagicMock(
+        return_value=(["test_payload"], None)
+    )
     monkeypatch.setattr(decoder, "_WECHAT_QR", mock_reader)
     monkeypatch.setattr(decoder, "_WECHAT_TIMEOUT", 2.0)
 
@@ -66,4 +70,6 @@ def test_qreader_cached_across_calls(monkeypatch):
     decoder._try_qreader(img)
     decoder._try_qreader(img)
 
-    assert create_count[0] == 1, f"QReader created {create_count[0]} times instead of once"
+    assert create_count[0] == 1, (
+        f"QReader created {create_count[0]} times instead of once"
+    )

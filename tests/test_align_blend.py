@@ -46,9 +46,9 @@ def test_small_shift_is_corrected():
     assert result.shape == ref.shape
     # Should not crash; result should be close to ref
     diff = np.abs(result.astype(int) - ref.astype(int)).mean()
-    assert (
-        diff < 20
-    ), f"Blend should be close to reference, got mean diff {diff:.1f}"
+    assert diff < 20, (
+        f"Blend should be close to reference, got mean diff {diff:.1f}"
+    )
 
 
 def test_large_shift_frame_skipped():

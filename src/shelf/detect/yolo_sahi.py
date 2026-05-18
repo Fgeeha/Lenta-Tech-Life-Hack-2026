@@ -202,7 +202,11 @@ class YOLOSahiDetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (0, 200, 255), 6
+                out,
+                (int(d.x_min), int(d.y_min)),
+                (int(d.x_max), int(d.y_max)),
+                (0, 200, 255),
+                6,
             )
             cv2.putText(
                 out,

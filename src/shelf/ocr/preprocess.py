@@ -222,7 +222,13 @@ def ocr_variants(crop: np.ndarray) -> list[np.ndarray]:
     if _sr_enabled():
         # Pre-process once (no upscale), then run SR once → 3 post-processing variants.
         base = preprocess_crop(
-            crop, upscale=1, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
+            crop,
+            upscale=1,
+            glare=True,
+            deskew=True,
+            sharpen=False,
+            clahe=False,
+            use_sr=False,
         )
         from shelf.ocr.sr import upscale_crop as _sr_upscale
 
@@ -239,13 +245,31 @@ def ocr_variants(crop: np.ndarray) -> list[np.ndarray]:
     # upscale=2/3 variants still follow as fallbacks for larger-text crops.
     return [
         preprocess_crop(
-            crop, upscale=1, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
+            crop,
+            upscale=1,
+            glare=True,
+            deskew=True,
+            sharpen=False,
+            clahe=False,
+            use_sr=False,
         ),
         preprocess_crop(
-            crop, upscale=2, glare=True, deskew=True, sharpen=False, clahe=False, use_sr=False
+            crop,
+            upscale=2,
+            glare=True,
+            deskew=True,
+            sharpen=False,
+            clahe=False,
+            use_sr=False,
         ),
         preprocess_crop(
-            crop, upscale=3, glare=True, deskew=True, sharpen=False, clahe=True, use_sr=False
+            crop,
+            upscale=3,
+            glare=True,
+            deskew=True,
+            sharpen=False,
+            clahe=True,
+            use_sr=False,
         ),
     ]
 

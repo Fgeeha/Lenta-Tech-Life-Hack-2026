@@ -189,17 +189,29 @@ def optimize_tag(
     for ocr_field, qr_field in _PRICE_OCR_TO_QR.items():
         price = _normalize_price_for_field(data.get(ocr_field, ""), comma=False)
         if price:
-            set_if(qr_field, price, f"fill_{qr_field}_from_{ocr_field}", replace_absent=True)
+            set_if(
+                qr_field,
+                price,
+                f"fill_{qr_field}_from_{ocr_field}",
+                replace_absent=True,
+            )
 
     # price2_qr is the 5%-discount Lenta card tier: price1 * 0.95.
     # Within the _field_match tolerance of 1.5 this derivation is 100% accurate
     # across all 5 labeled GT videos.
     p2_current = str(data.get("price2_qr", "") or "").strip()
     if _is_missing(p2_current, absent_is_missing=True):
-        p1_val = _price_to_float(data.get("price1_qr") or data.get("price_default"))
+        p1_val = _price_to_float(
+            data.get("price1_qr") or data.get("price_default")
+        )
         if p1_val is not None and p1_val > 0:
             price2_derived = f"{p1_val * 0.95:.2f}"
-            set_if("price2_qr", price2_derived, "derive_price2_qr_5pct", replace_absent=True)
+            set_if(
+                "price2_qr",
+                price2_derived,
+                "derive_price2_qr_5pct",
+                replace_absent=True,
+            )
 
     if _discount_fill_enabled():
         promo = _normalize_price_for_field(
@@ -216,12 +228,14 @@ def optimize_tag(
     card_val = _price_to_float(data.get("price_card"))
     if default_val is not None and card_val is not None:
         if card_val > default_val * 1.015:
-            old_card, old_default = str(data.get("price_card", "")), str(
-                data.get("price_default", "")
+            old_card, old_default = (
+                str(data.get("price_card", "")),
+                str(data.get("price_default", "")),
             )
-            data["price_card"], data["price_default"] = _fmt_price(
-                default_val
-            ), _fmt_price(card_val)
+            data["price_card"], data["price_default"] = (
+                _fmt_price(default_val),
+                _fmt_price(card_val),
+            )
             changes.append(
                 Pass80Change(
                     row_index,
@@ -271,11 +285,19 @@ def optimize_tag(
                         "catalog_name",
                     )
                 )
-            if entry.id_sku and _is_missing(str(data.get("id_sku", "")), absent_is_missing=True):
+            if entry.id_sku and _is_missing(
+                str(data.get("id_sku", "")), absent_is_missing=True
+            ):
                 old_sku = str(data.get("id_sku", "") or "")
                 data["id_sku"] = entry.id_sku
                 changes.append(
-                    Pass80Change(row_index, "id_sku", old_sku, entry.id_sku, "catalog_id_sku")
+                    Pass80Change(
+                        row_index,
+                        "id_sku",
+                        old_sku,
+                        entry.id_sku,
+                        "catalog_id_sku",
+                    )
                 )
             for field_name in ("price_default", "price_card"):
                 price = _normalize_price_for_field(
@@ -285,10 +307,20 @@ def optimize_tag(
                     set_if(field_name, price, f"catalog_{field_name}")
             # Fill metadata fields that apply_catalog may have missed (e.g. after
             # SKU normalization reveals a catalog match not found in the first pass).
-            for field_name in ("special_symbols", "code", "print_datetime", "additional_info"):
+            for field_name in (
+                "special_symbols",
+                "code",
+                "print_datetime",
+                "additional_info",
+            ):
                 val = str(getattr(entry, field_name, "") or "").strip()
                 if val:
-                    set_if(field_name, val, f"catalog_{field_name}", replace_absent=True)
+                    set_if(
+                        field_name,
+                        val,
+                        f"catalog_{field_name}",
+                        replace_absent=True,
+                    )
 
     return PriceTag(**data), changes
 

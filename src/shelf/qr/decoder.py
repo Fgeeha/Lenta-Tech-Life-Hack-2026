@@ -386,7 +386,9 @@ def _try_wechat_qr(image: np.ndarray) -> list[str]:
             return [d for d in decoded if d]
     except _NativeTimeout:
         shape = image.shape if image is not None else None
-        logger.warning("WeChatQR timeout %.1fs shape=%s", _WECHAT_TIMEOUT, shape)
+        logger.warning(
+            "WeChatQR timeout %.1fs shape=%s", _WECHAT_TIMEOUT, shape
+        )
         return []
     except Exception as exc:
         logger.debug("WeChatQR decode error: %s", exc)
@@ -408,7 +410,11 @@ def _try_zxingcpp(image: np.ndarray) -> list[str]:
     try:
         import zxingcpp  # type: ignore
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        gray = (
+            cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            if image.ndim == 3
+            else image
+        )
         results = zxingcpp.read_barcodes(gray)
         return [r.text for r in results if r.valid and r.text]
     except Exception:
@@ -604,13 +610,17 @@ def _preprocess_for_glare(roi: np.ndarray) -> list[np.ndarray]:
         l_ch, a_ch, b_ch = cv2.split(lab)
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
         variants.append(
-            cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+            cv2.cvtColor(
+                cv2.merge([clahe.apply(l_ch), a_ch, b_ch]), cv2.COLOR_LAB2BGR
+            )
         )
     except Exception:
         pass
     # Bilateral filter — reduces glare while preserving QR module edges.
     try:
-        variants.append(cv2.bilateralFilter(roi, d=9, sigmaColor=75, sigmaSpace=75))
+        variants.append(
+            cv2.bilateralFilter(roi, d=9, sigmaColor=75, sigmaSpace=75)
+        )
     except Exception:
         pass
     # Inverted image — helps when glare turns dark QR modules white.
@@ -852,7 +862,9 @@ def decode_barcode(
         return ""
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
     for source, img in _named_roi_variants(crop, "barcode")[:roi_limit]:
-        for raw in _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img):
+        for raw in (
+            _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img)
+        ):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)
@@ -878,7 +890,9 @@ def decode_barcode(
         return ""
     full_limit = _variant_limit(default_full=10_000, default_fast=12)
     for idx, img in enumerate(_image_variants(crop)[:full_limit]):
-        for raw in _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img):
+        for raw in (
+            _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img)
+        ):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)

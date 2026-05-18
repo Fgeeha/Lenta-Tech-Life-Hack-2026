@@ -14,18 +14,20 @@ _BBOX_COLS = frozenset({"x_min", "y_min", "x_max", "y_max"})
 
 # Price-like fields where comma decimal separator must become dot in the submission.
 # discount_amount ("-23%") and product_name ("Молоко, 1л") are intentionally excluded.
-_PRICE_COLS = frozenset({
-    "price_default",
-    "price_card",
-    "price_discount",
-    "price1_qr",
-    "price2_qr",
-    "price3_qr",
-    "price4_qr",
-    "wholesale_level_1_price",
-    "wholesale_level_2_price",
-    "action_price_qr",
-})
+_PRICE_COLS = frozenset(
+    {
+        "price_default",
+        "price_card",
+        "price_discount",
+        "price1_qr",
+        "price2_qr",
+        "price3_qr",
+        "price4_qr",
+        "wholesale_level_1_price",
+        "wholesale_level_2_price",
+        "action_price_qr",
+    }
+)
 
 
 def _format_bbox_coord(value: object) -> str:

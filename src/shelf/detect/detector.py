@@ -35,7 +35,9 @@ class Detection:
 
     @property
     def area(self) -> int:
-        return max(0, int(self.x_max - self.x_min)) * max(0, int(self.y_max - self.y_min))
+        return max(0, int(self.x_max - self.x_min)) * max(
+            0, int(self.y_max - self.y_min)
+        )
 
     @property
     def aspect(self) -> float:
@@ -162,7 +164,9 @@ class MSERDetector:
                 continue
 
             # Boost rectangular regions with orange/yellow/red background typical for price tags.
-            crop = frame[int(det.y_min) : int(det.y_max), int(det.x_min) : int(det.x_max)]
+            crop = frame[
+                int(det.y_min) : int(det.y_max), int(det.x_min) : int(det.x_max)
+            ]
             color_boost = _price_tag_color_score(crop)
             text_boost = _text_edge_score(crop)
             det.confidence = min(
@@ -183,7 +187,11 @@ class MSERDetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (0, 255, 0), 6
+                out,
+                (int(d.x_min), int(d.y_min)),
+                (int(d.x_max), int(d.y_max)),
+                (0, 255, 0),
+                6,
             )
             cv2.putText(
                 out,
@@ -262,7 +270,11 @@ class YOLODetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (255, 100, 0), 6
+                out,
+                (int(d.x_min), int(d.y_min)),
+                (int(d.x_max), int(d.y_max)),
+                (255, 100, 0),
+                6,
             )
             cv2.putText(
                 out,
@@ -345,7 +357,11 @@ class HybridDetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (0, 220, 255), 6
+                out,
+                (int(d.x_min), int(d.y_min)),
+                (int(d.x_max), int(d.y_max)),
+                (0, 220, 255),
+                6,
             )
             cv2.putText(
                 out,

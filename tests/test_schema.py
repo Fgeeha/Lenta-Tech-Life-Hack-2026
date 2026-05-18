@@ -45,15 +45,15 @@ def test_output_columns_exact_set():
 
 
 def test_output_columns_no_duplicates():
-    assert len(OUTPUT_COLUMNS) == len(
-        set(OUTPUT_COLUMNS)
-    ), "Есть дублирующиеся столбцы"
+    assert len(OUTPUT_COLUMNS) == len(set(OUTPUT_COLUMNS)), (
+        "Есть дублирующиеся столбцы"
+    )
 
 
 def test_output_columns_order():
-    assert (
-        OUTPUT_COLUMNS == EXPECTED_COLUMNS
-    ), "Порядок столбцов не совпадает с ТЗ §2"
+    assert OUTPUT_COLUMNS == EXPECTED_COLUMNS, (
+        "Порядок столбцов не совпадает с ТЗ §2"
+    )
 
 
 def test_price_tag_to_dict_keys():

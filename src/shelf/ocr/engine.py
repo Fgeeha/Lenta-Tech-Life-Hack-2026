@@ -254,7 +254,7 @@ class OCREngine:
 
     @staticmethod
     def _parse_paddle_dict(
-        page: dict[str, Any]
+        page: dict[str, Any],
     ) -> list[tuple[list, str, float]]:
         texts = page.get("rec_texts") or page.get("texts") or []
         scores = page.get("rec_scores") or page.get("scores") or []

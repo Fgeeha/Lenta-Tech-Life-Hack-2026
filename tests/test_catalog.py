@@ -75,7 +75,13 @@ def test_catalog_fills_id_sku_from_barcode(tmp_path):
 def test_catalog_does_not_overwrite_existing_id_sku(tmp_path):
     csv_path = tmp_path / "gt.csv"
     pd.DataFrame(
-        [{"barcode": "4607124143901", "id_sku": "270108726573", "product_name": "X"}]
+        [
+            {
+                "barcode": "4607124143901",
+                "id_sku": "270108726573",
+                "product_name": "X",
+            }
+        ]
     ).to_csv(csv_path, index=False)
     catalog = build_catalog_from_csvs([csv_path])
     # Tag already has a different id_sku — should not be overwritten

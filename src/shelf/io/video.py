@@ -102,7 +102,6 @@ def sample_frames(
                 break
 
             if frame_idx % step == 0:
-
                 if adaptive:
                     small = (
                         cv2.resize(frame, (int(w * scale), int(h * scale)))

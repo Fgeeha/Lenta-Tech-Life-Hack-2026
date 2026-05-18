@@ -89,7 +89,10 @@ def is_available() -> bool:
 
 def is_enabled() -> bool:
     """Return True when SHELF_SR_ENABLED=1 and model is available."""
-    return os.getenv("SHELF_SR_ENABLED", "").lower() in ("1", "true", "yes") and is_available()
+    return (
+        os.getenv("SHELF_SR_ENABLED", "").lower() in ("1", "true", "yes")
+        and is_available()
+    )
 
 
 def upscale_crop(crop: np.ndarray) -> np.ndarray:
