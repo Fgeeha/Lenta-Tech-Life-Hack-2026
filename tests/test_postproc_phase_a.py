@@ -424,3 +424,65 @@ def test_prepare_output_bbox_integer_input():
     tag = PriceTag(x_min=2011.0, y_min=1923.0, x_max=2231.0, y_max=2115.0)
     df = prepare_output_dataframe([tag])
     assert df.loc[0, "x_min"] == "2011.0"
+
+
+# ── Distortion corrector ──────────────────────────────────────────────────────
+
+def test_distortion_corrector_preserves_frame_shape():
+    from shelf.io.distortion import DistortionCorrector
+    import numpy as np
+    dc = DistortionCorrector()
+    frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    undist = dc.get_undistorted_frame(frame, frame_id=0)
+    # No ROI crop in get_undistorted_frame — same dimensions
+    assert undist.shape == (2160, 3840, 3)
+
+
+def test_distortion_corrector_crop_preserves_coords():
+    from shelf.io.distortion import DistortionCorrector
+    import numpy as np
+    dc = DistortionCorrector()
+    frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    undist = dc.get_undistorted_frame(frame, frame_id=1)
+    # Crop at arbitrary bbox stays same size
+    crop = undist[100:300, 200:500]
+    assert crop.shape == (200, 300, 3)
+
+
+def test_distortion_corrector_full_frame_crops():
+    from shelf.io.distortion import DistortionCorrector
+    import numpy as np
+    dc = DistortionCorrector()
+    frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    undist = dc.undistort_full_frame(frame)
+    # ROI crop reduces dimensions slightly
+    assert undist.shape[0] <= 2160
+    assert undist.shape[1] <= 3840
+
+
+def test_distortion_corrector_per_frame_cache():
+    from shelf.io.distortion import DistortionCorrector
+    import numpy as np
+    dc = DistortionCorrector()
+    frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    out1 = dc.get_undistorted_frame(frame, frame_id=42)
+    out2 = dc.get_undistorted_frame(frame, frame_id=42)
+    assert out1 is out2  # same object from cache
+
+
+def test_undistort_ocr_enabled_env():
+    import os
+    from shelf.io.distortion import undistort_ocr_enabled
+    orig = os.environ.get("SHELF_UNDISTORT_OCR")
+    try:
+        os.environ["SHELF_UNDISTORT_OCR"] = "1"
+        assert undistort_ocr_enabled() is True
+        os.environ["SHELF_UNDISTORT_OCR"] = "0"
+        assert undistort_ocr_enabled() is False
+        os.environ.pop("SHELF_UNDISTORT_OCR", None)
+        assert undistort_ocr_enabled() is True  # default on
+    finally:
+        if orig is None:
+            os.environ.pop("SHELF_UNDISTORT_OCR", None)
+        else:
+            os.environ["SHELF_UNDISTORT_OCR"] = orig

@@ -27,6 +27,7 @@ from shelf.postproc.merge import merge
 from shelf.postproc.pass80 import optimize_tag
 from shelf.postproc.voting import merge_candidate_tags
 from shelf.qr.decoder import decode_barcode, decode_qr, decode_qr_wechat_fast
+from shelf.io.distortion import get_undistorted_frame, undistort_ocr_enabled
 from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS, PriceTag
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -298,6 +299,9 @@ def eval_video(
         ts_ms = float(gt_row.get("frame_timestamp", 0))
         cap.set(cv2.CAP_PROP_POS_MSEC, ts_ms)
         ret, frame = cap.read()
+
+        if ret and undistort_ocr_enabled():
+            frame = get_undistorted_frame(frame, int(ts_ms))
 
         if not ret:
             scores_full.append(0.0)
@@ -641,6 +645,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--append-metrics", action="store_true")
+    parser.add_argument(
+        "--videos", nargs="*", default=None,
+        help="Only run on these video names (e.g. 49_5 43_15). Default: all.",
+    )
     return parser
 
 
@@ -652,6 +660,8 @@ def main() -> None:
     missing: list[str] = []
 
     for name, video_path, csv_path in labeled_paths(args.data_root):
+        if args.videos is not None and name not in args.videos:
+            continue
         if not video_path.exists() or not csv_path.exists():
             missing.append(f"{name}: video={video_path} csv={csv_path}")
             logger.warning(

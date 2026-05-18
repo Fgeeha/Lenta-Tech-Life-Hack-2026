@@ -13,6 +13,7 @@ import pandas as pd
 
 from shelf.detect.detector import make_detector
 from shelf.detect.tracker import TrackCandidate, Tracker
+from shelf.io.distortion import get_undistorted_frame, undistort_ocr_enabled
 from shelf.io.video import sample_frames
 from shelf.io.writer import prepare_output_dataframe, write_csv
 from shelf.ocr.engine import OCREngine
@@ -221,7 +222,10 @@ def run(
             )
             break
         dets = detector.detect(frame)
-        tracker.update(dets, frame, ts_ms)
+        # Detection on original frame (bboxes stay in original coords for CSV).
+        # Crops stored by tracker use undistorted frame so OCR sees straight text.
+        crop_frame = get_undistorted_frame(frame, frame_count) if undistort_ocr_enabled() else frame
+        tracker.update(dets, crop_frame, ts_ms)
         frame_count += 1
         if frame_count % 25 == 0:
             _progress(
