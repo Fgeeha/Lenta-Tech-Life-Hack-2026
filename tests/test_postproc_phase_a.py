@@ -480,7 +480,32 @@ def test_undistort_ocr_enabled_env():
         os.environ["SHELF_UNDISTORT_OCR"] = "0"
         assert undistort_ocr_enabled() is False
         os.environ.pop("SHELF_UNDISTORT_OCR", None)
-        assert undistort_ocr_enabled() is False  # default off (smoke test showed regression)
+        assert undistort_ocr_enabled() is False  # default off
+    finally:
+        if orig is None:
+            os.environ.pop("SHELF_UNDISTORT_OCR", None)
+        else:
+            os.environ["SHELF_UNDISTORT_OCR"] = orig
+
+
+def test_undistort_whitelist_auto_mode():
+    import os
+    from shelf.io.distortion import undistort_ocr_enabled_for_filename
+    orig = os.environ.get("SHELF_UNDISTORT_OCR")
+    try:
+        os.environ["SHELF_UNDISTORT_OCR"] = "auto"
+        assert undistort_ocr_enabled_for_filename("25_12-20.mp4") is True
+        assert undistort_ocr_enabled_for_filename("25_2-10.mp4") is True
+        assert undistort_ocr_enabled_for_filename("26_12-20.mp4") is False
+        assert undistort_ocr_enabled_for_filename("43_15.mp4") is False
+        assert undistort_ocr_enabled_for_filename("49_5.mp4") is False
+        assert undistort_ocr_enabled_for_filename("") is False
+        # env=0 → force off
+        os.environ["SHELF_UNDISTORT_OCR"] = "0"
+        assert undistort_ocr_enabled_for_filename("25_12-20.mp4") is False
+        # env=1 → force on
+        os.environ["SHELF_UNDISTORT_OCR"] = "1"
+        assert undistort_ocr_enabled_for_filename("26_12-20.mp4") is True
     finally:
         if orig is None:
             os.environ.pop("SHELF_UNDISTORT_OCR", None)

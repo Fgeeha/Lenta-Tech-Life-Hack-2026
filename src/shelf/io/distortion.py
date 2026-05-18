@@ -124,10 +124,34 @@ def get_corrector() -> DistortionCorrector:
     return _corrector
 
 
+# Per-video undistort whitelist (full eval May 18):
+# 25_xx → +4 and +2 tags; 26_12-20 → -4; 43_15 → -1; 49_5 → 0
+_UNDISTORT_WHITELIST = {"25_12-20", "25_2-10"}
+
+
+def undistort_ocr_enabled_for_filename(filename: str = "") -> bool:
+    """Per-video undistort selection based on May 18 full eval.
+
+    SHELF_UNDISTORT_OCR env:
+        0 (or unset) — force off everywhere
+        1            — force on everywhere
+        auto         — whitelist mode: on for 25_xx, off for others
+    """
+    override = os.environ.get("SHELF_UNDISTORT_OCR", "").strip()
+    if override == "0" or override == "":
+        return False
+    if override == "1":
+        return True
+    # auto mode: whitelist by filename substring
+    if not filename:
+        return False
+    name = os.path.basename(filename)
+    return any(wl in name for wl in _UNDISTORT_WHITELIST)
+
+
 def undistort_ocr_enabled() -> bool:
-    # Smoke test v1 (May 18): wrong crop coords → 0/61. Default OFF until v2 passes.
-    # Enable with SHELF_UNDISTORT_OCR=1.
-    return os.environ.get("SHELF_UNDISTORT_OCR", "0").strip() not in ("0", "false", "False")
+    """Legacy global flag. Use undistort_ocr_enabled_for_filename() in pipeline."""
+    return os.environ.get("SHELF_UNDISTORT_OCR", "0").strip() == "1"
 
 
 def get_undistorted_frame(frame: np.ndarray, frame_id: int) -> np.ndarray:

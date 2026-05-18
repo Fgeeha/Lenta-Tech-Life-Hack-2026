@@ -13,7 +13,7 @@ import pandas as pd
 
 from shelf.detect.detector import make_detector
 from shelf.detect.tracker import TrackCandidate, Tracker
-from shelf.io.distortion import get_undistorted_frame, undistort_ocr_enabled
+from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled_for_filename
 from shelf.io.video import sample_frames
 from shelf.io.writer import prepare_output_dataframe, write_csv
 from shelf.ocr.engine import OCREngine
@@ -225,7 +225,7 @@ def run(
         # Detection on original frame (bboxes stay in original coords for CSV).
         # When undistort enabled, tracker uses undistort_crop_at_orig_bbox so OCR
         # crops are geometrically correct without shifting submission bbox coords.
-        if undistort_ocr_enabled():
+        if undistort_ocr_enabled_for_filename(filename):
             _corr = get_corrector()
             _fid = frame_count
             def _crop_fn(f, bbox, _corr=_corr, _fid=_fid):

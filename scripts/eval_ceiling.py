@@ -27,7 +27,7 @@ from shelf.postproc.merge import merge
 from shelf.postproc.pass80 import optimize_tag
 from shelf.postproc.voting import merge_candidate_tags
 from shelf.qr.decoder import decode_barcode, decode_qr, decode_qr_wechat_fast
-from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled
+from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled_for_filename
 from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS, PriceTag
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -223,7 +223,7 @@ def _extract_one(
     my = max(5, int((y2 - y1) * 0.10))
     x1, y1 = max(0, x1 - mx), max(0, y1 - my)
     x2, y2 = min(w, x2 + mx), min(h, y2 + my)
-    if undistort_ocr_enabled():
+    if undistort_ocr_enabled_for_filename(str(row.get("filename", ""))):
         crop_raw = get_corrector().undistort_crop_at_orig_bbox(
             frame, (x1, y1, x2, y2), frame_id=int(row.get("frame_timestamp", -1))
         )
