@@ -216,6 +216,44 @@ class Catalog:
             return scored[0][1]
         return None
 
+    def lookup_by_unique_word(
+        self,
+        product_name_ocr: str,
+        video_hint: str,
+    ) -> "CatalogEntry | None":
+        """Match by a distinctive word unique to one catalog entry in this video.
+
+        Scans OCR product_name text for words (≥5 chars) that appear in
+        EXACTLY ONE catalog entry for the given video.  No price required —
+        the uniqueness constraint prevents false positives.
+
+        Useful for resolving price-collision groups where OCR captured part of
+        the product name (e.g. 'Активиа', 'Простоквашино', 'POTAPYЧ').
+        """
+        if not video_hint or not product_name_ocr:
+            return None
+        ocr_words = _significant_words(product_name_ocr)
+        if not ocr_words:
+            return None
+
+        # Build per-video word → [entries] index on first access (cheap, ~100 entries).
+        word_index: dict[str, list[CatalogEntry]] = {}
+        seen: set[str] = set()
+        for bc, entry in self.by_barcode.items():
+            if bc in seen:
+                continue
+            if not any(video_hint in sf for sf in entry.source_files):
+                continue
+            seen.add(bc)
+            for word in _significant_words(entry.product_name):
+                word_index.setdefault(word, []).append(entry)
+
+        for word in ocr_words:
+            hits = word_index.get(word, [])
+            if len(hits) == 1:
+                return hits[0]
+        return None
+
     @property
     def size(self) -> int:
         return len(self.by_barcode) + len(self.by_sku)
@@ -398,6 +436,12 @@ def apply_catalog(
                 video_hint=video,
             )
         if entry is None:
+            video = _video_hint_from_filename(getattr(tag, "filename", ""))
+            entry = catalog.lookup_by_unique_word(
+                product_name_ocr=str(getattr(tag, "product_name", "") or ""),
+                video_hint=video,
+            )
+        if entry is None:
             out.append(tag)
             continue
         data = tag.__dict__.copy()
@@ -487,6 +531,11 @@ def _parse_price_float(value: object) -> float | None:
         return v if v > 0 else None
     except (ValueError, TypeError):
         return None
+
+
+def _significant_words(text: str) -> set[str]:
+    """Extract lowercase words ≥5 chars suitable for unique-word catalog matching."""
+    return set(re.findall(r"[а-яёa-z]{5,}", (text or "").lower()))
 
 
 def _normalize_name_for_fuzzy(s: str) -> str:

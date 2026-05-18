@@ -9,6 +9,37 @@ import pandas as pd
 
 from shelf.schema import COLUMN_ALIASES, OUTPUT_COLUMNS, PriceTag
 
+# Price-like fields where comma decimal separator must become dot in the submission.
+# discount_amount ("-23%") and product_name ("Молоко, 1л") are intentionally excluded.
+_PRICE_COLS = frozenset({
+    "price_default",
+    "price_card",
+    "price_discount",
+    "price1_qr",
+    "price2_qr",
+    "price3_qr",
+    "price4_qr",
+    "wholesale_level_1_price",
+    "wholesale_level_2_price",
+    "action_price_qr",
+})
+
+
+def _dot_price(value: object) -> str:
+    """Normalize a price string to dot-decimal format.
+
+    '316,99' → '316.99'.  Non-numeric strings ('' / 'нет') pass through.
+    """
+    s = str(value or "").strip()
+    if not s or s == "нет":
+        return s
+    candidate = s.replace(",", ".")
+    try:
+        float(candidate)
+        return candidate
+    except ValueError:
+        return s  # not a number — leave unchanged
+
 
 def prepare_output_dataframe(
     tags: Iterable[PriceTag] | pd.DataFrame,
@@ -17,6 +48,7 @@ def prepare_output_dataframe(
 
     Missing columns are created as empty strings. Historical aliases from old GT files
     are normalized, but the output column names are always the official ones.
+    Price-like columns are normalised to dot-decimal format matching sample.csv.
     """
     if isinstance(tags, pd.DataFrame):
         df = tags.copy()
@@ -36,6 +68,12 @@ def prepare_output_dataframe(
             df[col] = (
                 df[col].astype(str).str.strip().replace({"nan": "", "None": ""})
             )
+
+    # Normalise price fields: comma decimal → dot (matches sample.csv format).
+    for col in _PRICE_COLS:
+        if col in df.columns:
+            df[col] = df[col].apply(_dot_price)
+
     return df
 
 

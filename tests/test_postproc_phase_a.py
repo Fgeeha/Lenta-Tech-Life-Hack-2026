@@ -329,3 +329,45 @@ def test_clean_symbol_normalises_latin_k():
     assert _clean_symbol("Ш") == "Ш"
     assert _clean_symbol("нет") == "нет"
     assert _clean_symbol("xyz") == ""
+
+
+# ── Numeric format normalization for submission ────────────────────────────────
+
+def test_dot_price_normalizes_comma():
+    from shelf.io.writer import _dot_price
+    assert _dot_price("316,99") == "316.99"
+    assert _dot_price("3789,49") == "3789.49"
+    assert _dot_price("316.99") == "316.99"   # already dot → unchanged
+
+
+def test_dot_price_leaves_absent_values():
+    from shelf.io.writer import _dot_price
+    assert _dot_price("нет") == "нет"
+    assert _dot_price("") == ""
+    assert _dot_price(None) == ""
+
+
+def test_dot_price_leaves_non_numeric_strings():
+    from shelf.io.writer import _dot_price
+    assert _dot_price("-23%") == "-23%"        # discount_amount format
+    assert _dot_price("Молоко, 1л") == "Молоко, 1л"  # product_name comma unchanged
+
+
+def test_prepare_output_normalizes_price_card():
+    from shelf.io.writer import prepare_output_dataframe
+    from shelf.schema import PriceTag
+    tag = PriceTag(price_card="316,99", price_default="415,79",
+                   price4_qr="316,99", price1_qr="415,79")
+    df = prepare_output_dataframe([tag])
+    assert df.loc[0, "price_card"] == "316.99"
+    assert df.loc[0, "price_default"] == "415.79"
+    assert df.loc[0, "price4_qr"] == "316.99"
+    assert df.loc[0, "price1_qr"] == "415.79"
+
+
+def test_prepare_output_leaves_discount_amount_unchanged():
+    from shelf.io.writer import prepare_output_dataframe
+    from shelf.schema import PriceTag
+    tag = PriceTag(discount_amount="-23%")
+    df = prepare_output_dataframe([tag])
+    assert df.loc[0, "discount_amount"] == "-23%"
