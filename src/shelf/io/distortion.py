@@ -82,7 +82,9 @@ def get_corrector() -> DistortionCorrector:
 
 
 def undistort_ocr_enabled() -> bool:
-    return os.environ.get("SHELF_UNDISTORT_OCR", "1").strip() not in ("0", "false", "False")
+    # Smoke test (May 18): undistort 49_5 → 0/61 vs baseline 1/61. Default OFF.
+    # Enable with SHELF_UNDISTORT_OCR=1 if future OCR engine benefits from it.
+    return os.environ.get("SHELF_UNDISTORT_OCR", "0").strip() not in ("0", "false", "False")
 
 
 def get_undistorted_frame(frame: np.ndarray, frame_id: int) -> np.ndarray:

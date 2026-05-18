@@ -480,7 +480,7 @@ def test_undistort_ocr_enabled_env():
         os.environ["SHELF_UNDISTORT_OCR"] = "0"
         assert undistort_ocr_enabled() is False
         os.environ.pop("SHELF_UNDISTORT_OCR", None)
-        assert undistort_ocr_enabled() is True  # default on
+        assert undistort_ocr_enabled() is False  # default off (smoke test showed regression)
     finally:
         if orig is None:
             os.environ.pop("SHELF_UNDISTORT_OCR", None)
