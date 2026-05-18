@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: sync-requirements
+        name: sync requirements.txt from poetry
+        language: system
+        entry: poetry export -f requirements.txt --without-hashes --without dev -o requirements.txt
+        pass_filenames: false
+        files: ^(pyproject\.toml|poetry\.lock)$

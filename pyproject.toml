@@ -31,6 +31,7 @@ paddlepaddle = {version = ">=2.6,<4", python = "<3.13"}
 pytest = "^8.3"
 ruff = ">=0.6"
 black = "^24.8"
+pre-commit = "^4.6.0"
 
 [tool.ruff]
 line-length = 80
