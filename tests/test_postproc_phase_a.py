@@ -272,7 +272,7 @@ def test_force_prices_overwrites_wrong_ocr_on_exact_barcode_match():
     assert result.price_default == "415,79"
 
 
-def test_force_prices_on_price_based_unique_lookup():
+def test_no_force_prices_on_price_based_lookup():
     from shelf.postproc.catalog import apply_catalog
     from shelf.schema import PriceTag
 
@@ -282,11 +282,11 @@ def test_force_prices_on_price_based_unique_lookup():
         "price_default": "415,79",
         "src": "43_15.csv",
     }])
-    # Price-based unique match: price_card uniquely identifies product →
-    # catalog DOES overwrite wrong OCR price_default (tier-2 force_prices).
+    # Price-based match does NOT force prices: a wrong-price OCR error could
+    # match a different product and corrupting existing OCR values is risky.
     tag = PriceTag(filename="43_15.mp4", barcode="", price_card="316,99", price_default="111,00")
     [result] = apply_catalog([tag], cat)
-    assert result.price_default == "415,79"  # catalog overwrites wrong OCR value
+    assert result.price_default == "111,00"  # not overwritten — too risky
 
 
 # ── New catalog fields: special_symbols, code, print_datetime, additional_info ─
