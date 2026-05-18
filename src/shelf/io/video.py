@@ -9,8 +9,6 @@ from typing import Callable, Generator
 import cv2
 import numpy as np
 
-from shelf.io.undistort import get_corrector, undistort_enabled
-
 logger = logging.getLogger(__name__)
 
 # Порог среднего оптического потока ниже которого считаем, что кадр почти дублирует предыдущий.
@@ -102,9 +100,6 @@ def sample_frames(
             ret, frame = cap.read()
             if not ret:
                 break
-
-            if undistort_enabled():
-                frame = get_corrector().undistort(frame)
 
             if frame_idx % step == 0:
 
