@@ -127,11 +127,17 @@ class Tracker:
             )
 
     def update(
-        self, detections: list[Detection], frame: np.ndarray, timestamp: float
+        self,
+        detections: list[Detection],
+        frame: np.ndarray,
+        timestamp: float,
+        crop_fn=None,
     ) -> list[tuple[int, Detection]]:
         """Обновить трекер. Вернуть [(track_id, det)] для активных треков.
 
         ``timestamp`` is milliseconds from the beginning of the video.
+        ``crop_fn`` optional callable(frame, bbox) -> np.ndarray for custom crop
+        extraction (e.g. undistort_crop_at_orig_bbox). When None, uses frame[y:y2, x:x2].
         """
         if self._tracker is None and not self._use_fallback:
             self._load()
@@ -142,7 +148,7 @@ class Tracker:
             tracked = self._update_bytetrack(detections)
 
         for tid, det in tracked:
-            self._update_state(tid, det, frame, timestamp)
+            self._update_state(tid, det, frame, timestamp, crop_fn=crop_fn)
         return tracked
 
     def _update_bytetrack(
@@ -215,10 +221,18 @@ class Tracker:
         return results
 
     def _update_state(
-        self, tid: int, det: Detection, frame: np.ndarray, timestamp_ms: float
+        self,
+        tid: int,
+        det: Detection,
+        frame: np.ndarray,
+        timestamp_ms: float,
+        crop_fn=None,
     ) -> None:
         x1, y1, x2, y2 = _clip_box(det, frame.shape, self.crop_margin)
-        crop = frame[y1:y2, x1:x2]
+        if crop_fn is not None:
+            crop = crop_fn(frame, (x1, y1, x2, y2))
+        else:
+            crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return
 

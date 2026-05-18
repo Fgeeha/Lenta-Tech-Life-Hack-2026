@@ -223,9 +223,16 @@ def run(
             break
         dets = detector.detect(frame)
         # Detection on original frame (bboxes stay in original coords for CSV).
-        # Crops stored by tracker use undistorted frame so OCR sees straight text.
-        crop_frame = get_undistorted_frame(frame, frame_count) if undistort_ocr_enabled() else frame
-        tracker.update(dets, crop_frame, ts_ms)
+        # When undistort enabled, tracker uses undistort_crop_at_orig_bbox so OCR
+        # crops are geometrically correct without shifting submission bbox coords.
+        if undistort_ocr_enabled():
+            _corr = get_corrector()
+            _fid = frame_count
+            def _crop_fn(f, bbox, _corr=_corr, _fid=_fid):
+                return _corr.undistort_crop_at_orig_bbox(f, bbox, frame_id=_fid)
+            tracker.update(dets, frame, ts_ms, crop_fn=_crop_fn)
+        else:
+            tracker.update(dets, frame, ts_ms)
         frame_count += 1
         if frame_count % 25 == 0:
             _progress(

@@ -1,14 +1,13 @@
 """Camera lens distortion correction — official Lenta calibration (17 May 2026).
 
-IMPORTANT: Only undistort_crop_preserve_coords() / the per-frame cache should be
-used inside the pipeline.  undistort_full_frame() shifts the coordinate system
-and MUST NOT be used where bbox values are later written to the submission CSV.
+Correct usage pattern:
+    crop = corrector.undistort_crop_at_orig_bbox(frame, (x1, y1, x2, y2))
+    # OCR on crop — text is geometrically straight
+    # bbox x1/y1/x2/y2 written to submission CSV UNCHANGED (original distorted coords)
 
-Correct usage pattern (per detection loop):
-    undist = get_undistorted_frame(frame, frame_id)  # cached remap, no coord shift
-    crop = undist[y1:y2, x1:x2]                      # crop at ORIGINAL bbox coords
-    # OCR on crop — text is now straight
-    # bbox x1/y1/x2/y2 written to CSV unchanged (original coords)
+Why coords must be mapped: cv2.remap shifts each pixel by up to ~100px for strong
+barrel distortion (k1=-0.276). Cropping the undistorted frame at ORIGINAL coords
+samples the wrong region. cv2.undistortPoints maps original → undistorted coords.
 """
 
 from __future__ import annotations
@@ -27,12 +26,15 @@ _DIST_COEFFS = [-0.276, 0.06, 0.0084, -0.0016, -0.0044]  # k1, k2, p1, p2, k3
 
 
 class DistortionCorrector:
-    """Undistorts frames or crops using official Lenta camera calibration.
+    """Undistorts crops using official Lenta camera calibration.
 
-    Two modes of use:
-    - get_undistorted_frame(frame, frame_id): cached remap of full frame,
-      NO ROI crop — coordinates preserved for bbox compatibility.
-    - undistort_full_frame(frame): remap + ROI crop (changes coords, debug only).
+    Primary method: undistort_crop_at_orig_bbox(frame, bbox)
+      - Remaps full frame (cached per frame_id)
+      - Maps bbox corners through cv2.undistortPoints to correct location
+      - Returns crop from undistorted frame at mapped coords
+      - Original bbox coords are NOT modified (safe for submission CSV)
+
+    Debug only: undistort_full_frame(frame) — applies ROI crop, changes coords.
     """
 
     def __init__(self) -> None:
@@ -41,34 +43,75 @@ class DistortionCorrector:
         w_mm = aspect * h_mm
         fx = _FOCAL_MM * _W / w_mm
         fy = _FOCAL_MM * _H / h_mm
-        K = np.array([[fx, 0, _W / 2], [0, fy, _H / 2], [0, 0, 1]], dtype=np.float32)
-        dist = np.array(_DIST_COEFFS, dtype=np.float32)
+        self._K = np.array([[fx, 0, _W / 2], [0, fy, _H / 2], [0, 0, 1]], dtype=np.float32)
+        self._dist = np.array(_DIST_COEFFS, dtype=np.float32)
 
-        # alpha=0: no black borders, slight crop at edges
-        new_K, self._roi = cv2.getOptimalNewCameraMatrix(K, dist, (_W, _H), 0, (_W, _H))
-        self._map1, self._map2 = cv2.initUndistortRectifyMap(
-            K, dist, None, new_K, (_W, _H), cv2.CV_32FC1
+        self._new_K, self._roi = cv2.getOptimalNewCameraMatrix(
+            self._K, self._dist, (_W, _H), 0, (_W, _H)
         )
-        # Per-frame cache (remap is ~200 ms; reuse across all tags in a frame)
+        self._map1, self._map2 = cv2.initUndistortRectifyMap(
+            self._K, self._dist, None, self._new_K, (_W, _H), cv2.CV_32FC1
+        )
+        # Per-frame cache: remap costs ~200 ms; reuse across all tags in a frame
         self._cache_id: int | None = None
         self._cache_frame: np.ndarray | None = None
 
-    def get_undistorted_frame(self, frame: np.ndarray, frame_id: int) -> np.ndarray:
-        """Remap full frame, NO ROI crop — original (W, H) preserved.
-
-        Bboxes from detection remain valid in this coordinate system.
-        Call once per frame; subsequent calls with the same frame_id reuse cache.
-        """
+    def _cached_remap(self, frame: np.ndarray, frame_id: int) -> np.ndarray:
         if self._cache_id != frame_id:
             self._cache_frame = cv2.remap(frame, self._map1, self._map2, cv2.INTER_LINEAR)
             self._cache_id = frame_id
         return self._cache_frame  # type: ignore[return-value]
 
+    def undistort_bbox_coords(
+        self, bbox: tuple[float, float, float, float]
+    ) -> tuple[float, float, float, float]:
+        """Map bbox corners from original (distorted) to undistorted pixel coords.
+
+        Use the returned coords to crop from the undistorted frame so the crop
+        contains the same physical region as the original bbox.
+        """
+        x1, y1, x2, y2 = bbox
+        pts = np.array([[[x1, y1]], [[x2, y2]]], dtype=np.float32)
+        pts_u = cv2.undistortPoints(pts, self._K, self._dist, P=self._new_K)
+        return (
+            float(pts_u[0, 0, 0]),
+            float(pts_u[0, 0, 1]),
+            float(pts_u[1, 0, 0]),
+            float(pts_u[1, 0, 1]),
+        )
+
+    def undistort_crop_at_orig_bbox(
+        self,
+        frame: np.ndarray,
+        bbox: tuple[float, float, float, float],
+        frame_id: int = -1,
+    ) -> np.ndarray:
+        """Return undistorted crop at the physical location of the original bbox.
+
+        1. Remap full frame (cached by frame_id, -1 disables cache)
+        2. Map bbox corners through cv2.undistortPoints
+        3. Crop undistorted frame at mapped coords
+
+        The original bbox is NOT modified — submission CSV coords are safe.
+        """
+        undist = self._cached_remap(frame, frame_id)
+        ux1, uy1, ux2, uy2 = self.undistort_bbox_coords(bbox)
+        h, w = undist.shape[:2]
+        ix1 = max(0, min(w - 1, int(ux1)))
+        iy1 = max(0, min(h - 1, int(uy1)))
+        ix2 = max(ix1 + 1, min(w, int(ux2) + 1))
+        iy2 = max(iy1 + 1, min(h, int(uy2) + 1))
+        return undist[iy1:iy2, ix1:ix2]
+
     def undistort_full_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Remap + ROI crop.  DEBUG / visualisation only — coords change."""
+        """Remap + ROI crop. DEBUG / visualisation only — coords change."""
         undist = cv2.remap(frame, self._map1, self._map2, cv2.INTER_LINEAR)
         x, y, w, h = self._roi
         return undist[y : y + h, x : x + w]
+
+    # Legacy compat
+    def get_undistorted_frame(self, frame: np.ndarray, frame_id: int) -> np.ndarray:
+        return self._cached_remap(frame, frame_id)
 
 
 _corrector: DistortionCorrector | None = None
@@ -82,11 +125,10 @@ def get_corrector() -> DistortionCorrector:
 
 
 def undistort_ocr_enabled() -> bool:
-    # Smoke test (May 18): undistort 49_5 → 0/61 vs baseline 1/61. Default OFF.
-    # Enable with SHELF_UNDISTORT_OCR=1 if future OCR engine benefits from it.
+    # Smoke test v1 (May 18): wrong crop coords → 0/61. Default OFF until v2 passes.
+    # Enable with SHELF_UNDISTORT_OCR=1.
     return os.environ.get("SHELF_UNDISTORT_OCR", "0").strip() not in ("0", "false", "False")
 
 
 def get_undistorted_frame(frame: np.ndarray, frame_id: int) -> np.ndarray:
-    """Module-level helper: get cached undistorted frame (no coord shift)."""
     return get_corrector().get_undistorted_frame(frame, frame_id)
