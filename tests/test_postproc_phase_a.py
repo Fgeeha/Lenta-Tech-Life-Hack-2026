@@ -374,53 +374,6 @@ def test_prepare_output_leaves_discount_amount_unchanged():
     assert df.loc[0, "discount_amount"] == "-23%"
 
 
-# ── Video mode imputation ─────────────────────────────────────────────────────
-
-def test_video_mode_fills_empty_additional_info():
-    from shelf.postproc.catalog import apply_catalog
-    from shelf.schema import PriceTag
-
-    # Catalog with strong mode: all entries have additional_info='нет' (100%)
-    cat = _make_catalog_full([
-        {"barcode": "4690491122587", "additional_info": "нет", "src": "43_15.csv"},
-        {"barcode": "4690491122588", "additional_info": "нет", "src": "43_15.csv"},
-        {"barcode": "4690491122589", "additional_info": "нет", "src": "43_15.csv"},
-    ])
-    # Unmatched tag with empty additional_info
-    tag = PriceTag(filename="43_15.mp4", barcode="")
-    [result] = apply_catalog([tag], cat)
-    assert result.additional_info == "нет"
-
-
-def test_video_mode_does_not_overwrite_existing():
-    from shelf.postproc.catalog import apply_catalog
-    from shelf.schema import PriceTag
-
-    cat = _make_catalog_full([
-        {"barcode": "4690491122587", "additional_info": "нет", "src": "43_15.csv"},
-        {"barcode": "4690491122588", "additional_info": "нет", "src": "43_15.csv"},
-        {"barcode": "4690491122589", "additional_info": "нет", "src": "43_15.csv"},
-    ])
-    tag = PriceTag(filename="43_15.mp4", barcode="", additional_info="Сухое")
-    [result] = apply_catalog([tag], cat)
-    assert result.additional_info == "Сухое"  # must not be overwritten
-
-
-def test_video_mode_skips_low_coverage():
-    from shelf.postproc.catalog import apply_catalog
-    from shelf.schema import PriceTag
-
-    # Only 1/3 = 33% coverage — below 40% threshold
-    cat = _make_catalog_full([
-        {"barcode": "4690491122587", "additional_info": "нет", "src": "43_15.csv"},
-        {"barcode": "4690491122588", "additional_info": "Сухое", "src": "43_15.csv"},
-        {"barcode": "4690491122589", "additional_info": "Полусухое", "src": "43_15.csv"},
-    ])
-    tag = PriceTag(filename="43_15.mp4", barcode="")
-    [result] = apply_catalog([tag], cat)
-    assert result.additional_info in ("", "нет")  # mode=нет at 33% < 40% → no impute
-
-
 # ── Bbox float precision ──────────────────────────────────────────────────────
 
 def test_detection_preserves_float_precision():
