@@ -70,3 +70,41 @@ wandb/
 mlruns/
 /tmp/
 
+
+# Local artifacts
+agentdb.rvf*
+ruvector.db
+*.cache
+__pycache__/
+*.pyc
+.venv/
+uv.lock
+
+# Intermediate reports
+reports/baseline_*.json
+reports/check_*.json
+reports/smoke*
+reports/preview_*.jpg
+reports/eval_stageA_fast/
+reports/ocr_failures/
+reports/ocr_preproc_*.json
+reports/roi_quality_*.json
+reports/decode_*.json
+reports/diag_*.json
+reports/alt_ocr_*.json
+reports/*.log
+reports/ceiling_after_*.json
+reports/ceiling_all_value*.json
+reports/ceiling_catalog_*.json
+reports/ceiling_sr*.json
+reports/ceiling_stage*.json
+reports/ceiling_30*.json
+reports/ceiling_phase*.json
+reports/ceiling_modeimpute*.json
+reports/ceiling_multiframe*.json
+
+# Old weights at root (use models/ only)
+yolo26n.pt
+yolov8n.pt
+yolov8s-worldv2.pt
+*.zip

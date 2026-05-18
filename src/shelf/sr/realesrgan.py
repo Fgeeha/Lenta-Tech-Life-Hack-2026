@@ -47,6 +47,21 @@ def _ensure_weights() -> bool:
         return False
 
 
+def _patch_torchvision() -> None:
+    """Shim for torchvision ≥0.17 which removed functional_tensor submodule."""
+    import sys
+    if "torchvision.transforms.functional_tensor" not in sys.modules:
+        try:
+            import types
+            import torchvision.transforms.functional as _F
+            _mod = types.ModuleType("torchvision.transforms.functional_tensor")
+            for _attr in dir(_F):
+                setattr(_mod, _attr, getattr(_F, _attr))
+            sys.modules["torchvision.transforms.functional_tensor"] = _mod
+        except Exception:
+            pass
+
+
 def _load_model():
     global _MODEL
     if _MODEL is not None:
@@ -54,6 +69,7 @@ def _load_model():
     if not _ensure_weights():
         return None
     try:
+        _patch_torchvision()
         from basicsr.archs.rrdbnet_arch import RRDBNet
         from realesrgan import RealESRGANer
 

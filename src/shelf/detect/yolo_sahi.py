@@ -177,10 +177,10 @@ class YOLOSahiDetector:
                     bx1, by1, bx2, by2 = box.xyxy[0].tolist()
                     conf = float(box.conf[0])
                     det = Detection(
-                        x_min=max(0, int(bx1 + tx)),
-                        y_min=max(0, int(by1 + ty)),
-                        x_max=min(w, int(bx2 + tx)),
-                        y_max=min(h, int(by2 + ty)),
+                        x_min=max(0.0, bx1 + tx),
+                        y_min=max(0.0, by1 + ty),
+                        x_max=min(float(w), bx2 + tx),
+                        y_max=min(float(h), by2 + ty),
                         confidence=conf,
                         cls_name="tag",
                     )
@@ -202,12 +202,12 @@ class YOLOSahiDetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 200, 255), 6
+                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (0, 200, 255), 6
             )
             cv2.putText(
                 out,
                 f"tiled {d.confidence:.2f}",
-                (d.x_min, max(40, d.y_min - 10)),
+                (int(d.x_min), max(40, int(d.y_min) - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.5,
                 (0, 200, 255),

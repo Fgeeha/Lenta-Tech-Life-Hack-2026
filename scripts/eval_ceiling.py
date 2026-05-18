@@ -22,18 +22,37 @@ from shelf.ocr.engine import OCREngine
 from shelf.ocr.parser import parse_ocr_result
 from shelf.ocr.preprocess import ocr_variants
 from shelf.ocr.template import classify_color
-from shelf.postproc.catalog import load_catalog_from_env
+from shelf.postproc.catalog import apply_catalog, load_catalog_from_env
 from shelf.postproc.merge import merge
 from shelf.postproc.pass80 import optimize_tag
 from shelf.postproc.voting import merge_candidate_tags
-from shelf.qr.decoder import decode_barcode, decode_qr
-from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS
+from shelf.qr.decoder import decode_barcode, decode_qr, decode_qr_wechat_fast
+from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled_for_filename
+from shelf.schema import ABSENT_VALUE, OUTPUT_COLUMNS, PriceTag
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 DATA_ROOT = Path("Данные")
 LABELED_NAMES = ["25_12-20", "25_2-10", "26_12-20", "43_15", "49_5"]
+
+# Set SHELF_QR_MULTIFRAME_RADIUS_MS>0 to also try nearby frames for QR decode.
+# Each offset adds one decode_qr_wechat_fast() call (~0.05-0.2s); 0 = disabled.
+_QR_MF_RADIUS_MS = int(
+    __import__("os").environ.get("SHELF_QR_MULTIFRAME_RADIUS_MS", "0")
+)
+_QR_MF_STEP_MS = int(
+    __import__("os").environ.get("SHELF_QR_MULTIFRAME_STEP_MS", "50")
+)
+_QR_MULTIFRAME_OFFSETS_MS: list[int] = (
+    [
+        off
+        for off in range(-_QR_MF_RADIUS_MS, _QR_MF_RADIUS_MS + 1, _QR_MF_STEP_MS)
+        if off != 0
+    ]
+    if _QR_MF_RADIUS_MS > 0
+    else []
+)
 
 QR_EVAL_FIELDS = {
     "qr_code_barcode",
@@ -65,6 +84,14 @@ EVAL_FIELDS_FULL = [
 
 EVAL_FIELDS_NO_QR = [
     field for field in EVAL_FIELDS_FULL if field not in QR_EVAL_FIELDS
+]
+
+# All 23 value fields (mirrors eval_on_labeled.py ALL_VALUE_FIELDS).
+# Threshold: math.ceil(0.80 * 23) = 19 correct fields to PASS.
+ALL_VALUE_FIELDS = [
+    c
+    for c in OUTPUT_COLUMNS
+    if c not in {"filename", "frame_timestamp", "x_min", "y_min", "x_max", "y_max"}
 ]
 
 # Для обратной совместимости старого вывода field_accuracy
@@ -196,7 +223,12 @@ def _extract_one(
     my = max(5, int((y2 - y1) * 0.10))
     x1, y1 = max(0, x1 - mx), max(0, y1 - my)
     x2, y2 = min(w, x2 + mx), min(h, y2 + my)
-    crop_raw = frame[y1:y2, x1:x2]
+    if undistort_ocr_enabled_for_filename(str(row.get("filename", ""))):
+        crop_raw = get_corrector().undistort_crop_at_orig_bbox(
+            frame, (x1, y1, x2, y2), frame_id=int(row.get("frame_timestamp", -1))
+        )
+    else:
+        crop_raw = frame[y1:y2, x1:x2]
     if crop_raw.size == 0:
         return {}
 
@@ -234,7 +266,10 @@ def _extract_one(
             qr_fields,
         )
     )
-    merged, _ = optimize_tag(merged, catalog=load_catalog_from_env())
+    _cat = load_catalog_from_env()
+    # apply_catalog handles video-scoped price lookup (when barcode/sku absent)
+    [merged] = apply_catalog([merged], _cat)
+    merged, _ = optimize_tag(merged, catalog=_cat)
     return merged.__dict__
 
 
@@ -253,13 +288,16 @@ def eval_video(
     scores_no_qr: list[float] = []
     scores_no_qr_has_qr_gt: list[float] = []
     scores_no_qr_no_qr_gt: list[float] = []
+    scores_all: list[float] = []
 
     field_hits: dict[str, int] = {f: 0 for f in EVAL_FIELDS_FULL}
     field_hits_no_qr: dict[str, int] = {f: 0 for f in EVAL_FIELDS_NO_QR}
+    field_hits_all: dict[str, int] = {f: 0 for f in ALL_VALUE_FIELDS}
     fill_hits: dict[str, int] = {f: 0 for f in OUTPUT_COLUMNS}
 
     barcode_count = 0
     qr_barcode_count = 0
+    per_tag_results: list[dict] = []
     gt_has_qr_count = 0
     gt_no_qr_count = 0
 
@@ -271,6 +309,7 @@ def eval_video(
         if not ret:
             scores_full.append(0.0)
             scores_no_qr.append(0.0)
+            scores_all.append(0.0)
 
             if _gt_has_qr(gt_row):
                 gt_has_qr_count += 1
@@ -281,6 +320,49 @@ def eval_video(
             continue
 
         pred = _extract_one(frame, gt_row, ocr, ocr_ru)
+
+        # Multi-frame QR fallback: if QR not decoded from GT-timestamp frame,
+        # try nearby offsets with a lightweight WeChatQR scan (~0.05-0.2s/frame).
+        # Enabled via SHELF_QR_MULTIFRAME_RADIUS_MS env var (default 0 = off).
+        if _QR_MULTIFRAME_OFFSETS_MS and not _present(pred.get("qr_code_barcode")):
+            x1r = int(gt_row.x_min); y1r = int(gt_row.y_min)
+            x2r = int(gt_row.x_max); y2r = int(gt_row.y_max)
+            fh_r, fw_r = frame.shape[:2]
+            mx_r = max(5, int((x2r - x1r) * 0.10))
+            my_r = max(5, int((y2r - y1r) * 0.10))
+            x1r = max(0, x1r - mx_r); y1r = max(0, y1r - my_r)
+            x2r = min(fw_r, x2r + mx_r); y2r = min(fh_r, y2r + my_r)
+            for off_ms in _QR_MULTIFRAME_OFFSETS_MS:
+                alt_ts = ts_ms + off_ms
+                if alt_ts < 0:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_MSEC, alt_ts)
+                ok, alt_frame = cap.read()
+                if not ok:
+                    continue
+                alt_fh, alt_fw = alt_frame.shape[:2]
+                alt_crop = alt_frame[
+                    y1r : min(alt_fh, y2r), x1r : min(alt_fw, x2r)
+                ]
+                if alt_crop.size == 0:
+                    continue
+                extra_qr = decode_qr_wechat_fast(alt_crop)
+                if extra_qr:
+                    for k, v in extra_qr.items():
+                        if k not in pred or not _present(pred.get(k)):
+                            pred[k] = v
+                    # Re-run pass80 + catalog to propagate QR fields:
+                    # price1_qr→price_default, price4_qr→price_card,
+                    # barcode→id_sku+product_name via catalog, discount derivation.
+                    _catalog = load_catalog_from_env()
+                    _tag = PriceTag(**{k: pred.get(k, "") for k in PriceTag.__dataclass_fields__})
+                    [_tag] = apply_catalog([_tag], _catalog)
+                    _tag, _ = optimize_tag(_tag, catalog=_catalog)
+                    pred = _tag.__dict__
+                    logger.info("QR multiframe decode at offset %+dms", off_ms)
+                    break
+            # Restore cap position after multi-frame scan
+            cap.set(cv2.CAP_PROP_POS_MSEC, ts_ms)
 
         barcode_count += int(_present(pred.get("barcode")))
         qr_barcode_count += int(_present(pred.get("qr_code_barcode")))
@@ -314,6 +396,30 @@ def eval_video(
             ):
                 field_hits_no_qr[field] += 1
 
+        score_all, _ = _score_fields(pred, gt_row, ALL_VALUE_FIELDS)
+        scores_all.append(score_all)
+        for field in ALL_VALUE_FIELDS:
+            if _field_match(
+                pred.get(field, ""), gt_row.get(field, ""), field=field
+            ):
+                field_hits_all[field] += 1
+
+        # Per-tag dump for near-miss analysis
+        wrong_all = [f for f in ALL_VALUE_FIELDS
+                     if not _field_match(pred.get(f, ""), gt_row.get(f, ""), field=f)]
+        empty_all = [f for f in wrong_all if not _present(pred.get(f, ""))]
+        _, correct_all = _score_fields(pred, gt_row, ALL_VALUE_FIELDS)
+        per_tag_results.append({
+            "video": name,
+            "ts": int(gt_row.get("frame_timestamp", 0)),
+            "pass80": score_all >= 0.80,
+            "score_all": round(score_all, 4),
+            "correct_all": correct_all,
+            "total_all": len(ALL_VALUE_FIELDS),
+            "wrong_fields": wrong_all,
+            "empty_fields": empty_all,
+        })
+
         if _gt_has_qr(gt_row):
             gt_has_qr_count += 1
             scores_no_qr_has_qr_gt.append(score_no_qr)
@@ -329,6 +435,7 @@ def eval_video(
     n_pass_no_qr = sum(1 for s in scores_no_qr if s >= 0.80)
     n_pass_no_qr_has_qr_gt = sum(1 for s in scores_no_qr_has_qr_gt if s >= 0.80)
     n_pass_no_qr_no_qr_gt = sum(1 for s in scores_no_qr_no_qr_gt if s >= 0.80)
+    n_pass_all = sum(1 for s in scores_all if s >= 0.80)
 
     return {
         "video": name,
@@ -363,9 +470,16 @@ def eval_video(
         "field_accuracy_no_qr": {
             f: field_hits_no_qr[f] / max(1, n_total) for f in EVAL_FIELDS_NO_QR
         },
+        "n_pass_all": n_pass_all,
+        "metric_all": n_pass_all / max(1, n_total),
+        "avg_field_all": sum(scores_all) / max(1, len(scores_all)),
+        "field_accuracy_all": {
+            f: field_hits_all[f] / max(1, n_total) for f in ALL_VALUE_FIELDS
+        },
         "fill_rates": {
             f: fill_hits[f] / max(1, n_total) for f in OUTPUT_COLUMNS
         },
+        "per_tag": per_tag_results,
     }
 
 
@@ -383,10 +497,22 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     )
     total_pass_no_qr_no_qr_gt = sum(r["n_pass_no_qr_no_qr_gt"] for r in results)
 
+    total_pass_all = sum(r["n_pass_all"] for r in results)
+
     return {
         "videos": results,
         "overall": {
             "n_gt": total_gt,
+            # ALL_VALUE metric (23 fields, ≥19/23 to pass)
+            "metric_80_all": total_pass_all / max(1, total_gt),
+            "avg_field_all": sum(r["avg_field_all"] * r["n_gt"] for r in results)
+            / max(1, total_gt),
+            "n_pass_all": total_pass_all,
+            "field_accuracy_all": {
+                f: sum(r["field_accuracy_all"][f] * r["n_gt"] for r in results)
+                / max(1, total_gt)
+                for f in ALL_VALUE_FIELDS
+            },
             # Full metric
             "metric_80": total_pass / max(1, total_gt),
             "avg_field": sum(r["avg_field"] * r["n_gt"] for r in results)
@@ -454,6 +580,11 @@ def print_summary(summary: dict[str, Any]) -> None:
     o = summary["overall"]
 
     print("\n=== OVERALL ===")
+    print(
+        f"  ALL-VALUE metric@80%={o['metric_80_all']:.3f}  "
+        f"avg_field={o['avg_field_all']:.3f}  "
+        f"pass={o['n_pass_all']}/{o['n_gt']}  (23 fields)"
+    )
     print(
         f"  FULL      metric@80%={o['metric_80']:.3f}  "
         f"avg_field={o['avg_field']:.3f}  "
@@ -534,6 +665,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--append-metrics", action="store_true")
+    parser.add_argument(
+        "--videos", nargs="*", default=None,
+        help="Only run on these video names (e.g. 49_5 43_15). Default: all.",
+    )
     return parser
 
 
@@ -545,6 +680,8 @@ def main() -> None:
     missing: list[str] = []
 
     for name, video_path, csv_path in labeled_paths(args.data_root):
+        if args.videos is not None and name not in args.videos:
+            continue
         if not video_path.exists() or not csv_path.exists():
             missing.append(f"{name}: video={video_path} csv={csv_path}")
             logger.warning(
@@ -588,6 +725,12 @@ def main() -> None:
     if args.json_out:
         args.json_out.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        # Save per-tag breakdown alongside main JSON
+        per_tag_path = args.json_out.with_stem(args.json_out.stem + "_per_tag")
+        all_per_tag = [t for r in results for t in r.get("per_tag", [])]
+        per_tag_path.write_text(
+            json.dumps(all_per_tag, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     if args.append_metrics:
         append_metrics_md(summary)

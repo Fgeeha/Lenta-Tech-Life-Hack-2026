@@ -63,10 +63,10 @@ class PriceTag:
     # --- из видео ---
     filename: str = UNREAD_VALUE
     frame_timestamp: float = 0.0  # миллисекунды от начала видео
-    x_min: int = 0
-    y_min: int = 0
-    x_max: int = 0
-    y_max: int = 0
+    x_min: float = 0.0
+    y_min: float = 0.0
+    x_max: float = 0.0
+    y_max: float = 0.0
 
     # --- с ценника (текст) ---
     product_name: str = UNREAD_VALUE

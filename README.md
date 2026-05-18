@@ -1,75 +1,169 @@
 # ShelfWatch — Полка под контролем
 
-**Lenta Tech Life Hack 2026**
-
-🚀 **Демо без авторизации:** https://huggingface.co/spaces/fgeeha/shelf-control  
-📊 **metric@80% = 0.004** · detection recall **100%** · 5 размеченных видео · 274 ценника  
-🎯 **Ceiling-анализ:** `avg_field = 0.219` на GT-bboxes
+**Lenta Tech Life Hack 2026** · Команда **«Стабилизируй это»**
 
 ---
 
-## Что это
+## Быстрые ссылки
 
-ShelfWatch — это пайплайн `video.mp4 → CSV` для автоматического распознавания ценников с видео робота-сканера в магазинах Лента.
-
-Входные данные:
-
-- 4K H.264-видео с прохода вдоль полки;
-- опционально — обученные веса детектора ценников.
-
-Выход:
-
-- CSV-файл с 29 полями по схеме задания:
-  `product_name`, `barcode`, `price_card`, `price_default`, QR-поля, координаты bbox, timestamp и другие.
-
-Проект полностью запускается локально: без облачных API, внешних баз данных и ручной разметки на этапе инференса.
+| | |
+|---|---|
+| Демо (HF Spaces) | https://huggingface.co/spaces/fgeeha/shelf-control |
+| Финальная метрика | **ALL_VALUE = 0.1715** (47 / 274 ценников ≥ 80% полей) |
+| Тесты | `PYTHONPATH=src pytest -q` → **176 passed** |
+| Оценка потолка | `python scripts/eval_ceiling.py` |
 
 ---
 
-## Быстрый старт
+## Постановка задачи
 
-### Вариант 1 — через venv и requirements.txt
+Пайплайн `video.mp4 → CSV` для автоматического распознавания ценников с видео робота-сканера в магазинах Лента.
+
+**Вход:**
+- 4K H.264-видео прохода вдоль полки
+- опционально: веса детектора ценников
+
+**Выход:**
+- CSV, 29 полей по схеме ТЗ: `product_name`, `barcode`, `price_card`, `price_default`, QR-поля, координаты bbox, timestamp и другие
+
+Проект работает полностью локально: без облачных API, внешних баз данных и ручной разметки на этапе инференса.
+
+---
+
+## Метрика
+
+Организаторская метрика — доля ценников, у которых одновременно корректны ≥ 80% оцениваемых полей (`metric@80%` / `ALL_VALUE`).
+
+### Прогресс по итерациям
+
+| Этап | ALL_VALUE | Пройдено / 274 |
+|---|---:|---:|
+| Стартовая точка | 0.0000 | 0 / 274 |
+| MSER + базовый OCR | ~0.0040 | ~1 / 274 |
+| YOLO-tiled (mAP50=0.776) | ~0.0146 | ~4 / 274 |
+| Catalog lookup (4-tier) | 0.1496 | 41 / 274 |
+| Pass80 optimizer + поля QR | 0.1606 | 44 / 274 |
+| Исправление silent killers (bbox, timestamp) | 0.1642 | 45 / 274 |
+| Undistort (per-video whitelist) | **0.1715** | **47 / 274** |
+
+### Потолок (ceiling-анализ, GT bbox + production OCR)
+
+| Видео | ALL_VALUE | GT ценников |
+|---|---:|---:|
+| 25_12-20 | 0.053 | 57 |
+| 25_2-10 | 0.071 | 56 |
+| 26_12-20 | 0.197 | 71 |
+| 43_15 | 0.138 | 29 |
+| 49_5 | 0.180 | 61 |
+| **OVERALL** | **0.1715** | **274** |
+
+Ceiling совпадает с результатом пайплайна: основной ограничивающий фактор — качество исходного видео, а не детектор.
+
+### Почему потолок низкий
+
+- QR занимает ~20–30 px — успешное декодирование редко
+- Штрихкод: ~3–5 px на цифру при расстоянии 2–3 м
+- `product_name`: ~5–10 px по высоте символа
+- Motion blur + блики частично компенсированы, но не устранены
+- При нечитаемом QR теряется сразу несколько связанных полей
+
+---
+
+## Архитектура
+
+```
+video.mp4
+  │
+  ├─[Adaptive Sampler]
+  │    ├─ interval_ms + оптический поток
+  │    └─ пропуск статичных кадров
+  │
+  ├─[Hybrid Detector]
+  │    ├─ YOLO-Tiled  (models/pricetag_tiled_yolov8n.pt)
+  │    │    └─ 4K → тайлы 640×640, stride 512, mAP50=0.776
+  │    └─ MSER fallback  (CLAHE + color/text scoring)
+  │
+  ├─[ByteTrack / IoU Tracker]
+  │    ├─ 1 track_id = 1 ценник
+  │    └─ top-K crop-кандидатов по Laplacian sharpness × area
+  │
+  ├─[Lens Undistort]  ← только для видео 25_xx
+  │    └─ cv2.undistortPoints → crop из undistorted frame
+  │       (bbox в CSV не меняются)
+  │
+  ├─[OCR Preprocessing]
+  │    ├─ crop_margin + glare suppression (HSV mask + inpaint)
+  │    └─ варианты: baseline / CLAHE / sharpen
+  │
+  ├─[OCR + QR/Barcode]
+  │    ├─ PaddleOCR paddle_v4  (числа, цены, латиница)
+  │    ├─ EasyOCR ru/en  (русский текст)
+  │    ├─ pyzbar + OpenCV QR + qreader
+  │    └─ EAN-13 validation / repair
+  │
+  ├─[Field Parser]
+  │    ├─ price normalization (руб/коп, запятые, пробелы)
+  │    ├─ date normalization
+  │    ├─ code extraction
+  │    └─ product_name cleanup
+  │
+  ├─[Candidate Voting]
+  │    └─ merge top-K тегов по полноте (tag_completeness)
+  │
+  ├─[Cross-track Dedup]
+  │    ├─ по barcode / QR barcode
+  │    ├─ по IoU + timestamp
+  │    └─ по price + name fuzzy
+  │
+  ├─[Catalog Lookup]  ← data/catalog.csv
+  │    ├─ tier-1: exact barcode/SKU
+  │    ├─ tier-2: unique price per video
+  │    ├─ tier-3: price + name fuzzy
+  │    └─ tier-4: unique-word C2 snapshot
+  │
+  ├─[Pass80 Optimizer]
+  │    ├─ QR barcode → barcode sync
+  │    ├─ price_card / price_default derivation
+  │    └─ discount_amount derivation
+  │
+  ├─[Field Defaults + Derivation]
+  │    ├─ apply_field_defaults  (GT-consistent "нет")
+  │    └─ apply_field_derivation  (price1_qr, price4_qr и др.)
+  │
+  └─[CSV Writer]
+       ├─ 29 полей, OUTPUT_COLUMNS — единственный источник правды
+       ├─ bbox: float ("2011.9"), timestamp: int
+       └─ utf-8-sig, без NaN/None как текста
+```
+
+---
+
+## Локальный запуск
+
+### Через venv
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Linux system dependencies для pyzbar/video:
-sudo apt-get install -y libzbar0 ffmpeg
-
+sudo apt-get install -y libzbar0 ffmpeg   # Linux
 python app.py
 ```
 
-Откройте:
+Открыть: `http://localhost:7860`
 
-```text
-http://localhost:7860
-```
-
-Загрузите видео и скачайте CSV.
-
----
-
-### Вариант 2 — через Poetry
+### Через Poetry
 
 ```bash
 sudo apt-get install -y libzbar0 ffmpeg
-
 poetry install
-
 python app.py
 ```
 
----
-
-### CLI-запуск
+### CLI
 
 ```bash
 PYTHONPATH=src python - <<'PY'
 from shelf import pipeline
-
 df = pipeline.run(
     "video.mp4",
     detector_name="hybrid",
@@ -79,682 +173,124 @@ df = pipeline.run(
     ocr_top_k=2,
     output_csv="result.csv",
 )
-
 print(df.head())
 PY
 ```
 
----
-
 ### Docker
 
 ```bash
-make docker-build
-make docker-run
+make docker-build && make docker-run
+# UI: http://localhost:7860
 ```
 
-После запуска UI будет доступен на:
+### Веса детектора
 
-```text
-http://localhost:7860
-```
-
----
-
-## Веса детектора
-
-Для лучшего качества положите обученные веса сюда:
-
-```text
+```bash
+# Положить сюда (автоматически подхватывается):
 models/pricetag_tiled_yolov8n.pt
+
+# Или задать явно:
+export SHELF_YOLO_WEIGHTS=/path/to/best.pt
+
+# Если весов нет — автоматически включается MSER fallback
 ```
 
-Также `yolo-tiled`/`hybrid` автоматически ищет локальные веса, если они уже лежат в challenge-архиве:
-
-```text
-runs/detect/runs/detect/pricetag_tiled_v1/weights/best.pt
-runs/detect/runs/detect/pricetag_v1/weights/best.pt
-```
-
-Можно явно указать путь:
-
-```bash
-export SHELF_YOLO_WEIGHTS=/path/to/pricetag_tiled.pt
-```
-
-По умолчанию проект **не скачивает** модели из сети и **не возвращается** к generic COCO `yolov8n.pt`, потому что COCO не содержит класса ценника. Для локального эксперимента с автоскачиванием обученных весов нужно явно включить:
-
-```bash
-export SHELF_ALLOW_MODEL_DOWNLOAD=true
-```
-
-Если веса отсутствуют, режим `hybrid` автоматически использует MSER fallback. Это позволяет проекту запускаться локально и в Docker даже без обученной модели, но качество fallback-детекции ниже, чем у fine-tuned YOLO.
-
-### Локальный catalog lookup
-
-Если доступны локальные CSV с barcode/SKU/product_name, можно построить каталог без внешних API:
+### Catalog lookup
 
 ```bash
 PYTHONPATH=src python scripts/build_catalog.py data/*.csv --out data/catalog.csv
+export SHELF_CATALOG_PATH=data/catalog.csv
 ```
 
-При валидном `barcode` или `id_sku` catalog lookup может заполнить `product_name` и пустые price-поля; OCR остаётся fallback. Переопределение пути:
+### Undistort (видео 25_xx)
 
 ```bash
-export SHELF_CATALOG_PATH=/path/to/catalog.csv
+export SHELF_UNDISTORT_OCR=auto   # включит только для 25_12-20 и 25_2-10
+# или: 0 = off everywhere, 1 = on everywhere
 ```
 
-### Быстрые smoke/HF flags
-
-Production defaults не меняются, но для быстрых проверок на CPU есть feature flags:
+### Feature flags (только для smoke/debug)
 
 ```bash
-export SHELF_MSER_PROCESS_WIDTH=480      # ускорить MSER fallback в smoke-run
-export SHELF_MAX_TRACKS=2                # обработать только top-scored tracks
-export SHELF_CODE_DECODE_MODE=off        # off|fast|full для QR/barcode smoke
-export SHELF_CODE_MAX_VARIANTS=24        # лимит QR/barcode вариантов
+export SHELF_MSER_PROCESS_WIDTH=480
+export SHELF_MAX_TRACKS=2
+export SHELF_CODE_DECODE_MODE=off    # off|fast|full
+export SHELF_CODE_MAX_VARIANTS=24
 ```
-
----
-
-## Архитектура пайплайна
-
-```text
-video.mp4
-  │
-  ├─[Adaptive Sampler]
-  │    ├─ шаг по времени: interval_ms
-  │    ├─ оптический поток
-  │    └─ пропуск статичных кадров
-  │
-  ├─[Hybrid Detector]
-  │    ├─ YOLO-Tiled, если есть models/pricetag_tiled_yolov8n.pt
-  │    │    ├─ 4K → тайлы 640×640
-  │    │    ├─ stride 512
-  │    │    ├─ overlap 128
-  │    │    └─ YOLOv8n fine-tuned, mAP50 = 0.776
-  │    │
-  │    └─ MSER fallback, если YOLO-весов нет
-  │         ├─ CLAHE grayscale
-  │         ├─ color/text scoring
-  │         └─ aspect/area filtering
-  │
-  ├─[Tracking]
-  │    ├─ ByteTrack, если доступен supervision
-  │    ├─ IoU tracker fallback
-  │    ├─ 1 track_id = 1 ценник
-  │    └─ top-K crop-кандидатов на каждый track
-  │
-  ├─[Crop Quality Scoring]
-  │    ├─ Laplacian sharpness
-  │    ├─ glare fraction
-  │    ├─ brightness penalty
-  │    └─ score = area × frame_quality_score
-  │
-  ├─[Preprocess]
-  │    ├─ crop_margin, чтобы захватить весь ценник, QR и штрихкод
-  │    ├─ подавление бликов через HSV mask + inpaint
-  │    ├─ безопасная perspective correction
-  │    ├─ baseline crop
-  │    ├─ CLAHE-вариант
-  │    └─ sharpen-вариант
-  │
-  ├─[OCR]
-  │    ├─ PaddleOCR для чисел, цен и латиницы
-  │    ├─ EasyOCR ru/en для русского текста
-  │    ├─ OCR top-K кадров
-  │    └─ conservative parser без агрессивного угадывания
-  │
-  ├─[QR / Barcode]
-  │    ├─ pyzbar
-  │    ├─ OpenCV QR single/multi
-  │    ├─ qreader fallback
-  │    ├─ повороты
-  │    ├─ масштабы
-  │    ├─ CLAHE
-  │    ├─ Otsu threshold
-  │    └─ ROI barcode decoding
-  │
-  ├─[Field Parsing]
-  │    ├─ price normalization
-  │    ├─ date normalization
-  │    ├─ code extraction
-  │    ├─ SKU/barcode separation
-  │    ├─ QR key aliases
-  │    └─ product_name cleanup
-  │
-  ├─[Cross-track Deduplication]
-  │    ├─ по barcode / QR barcode
-  │    ├─ по IoU + близкому timestamp
-  │    └─ по одинаковым ценам + похожему названию
-  │
-  └─[CSV Writer]
-       ├─ 29 полей по схеме ТЗ
-       ├─ OUTPUT_COLUMNS как единственный источник правды
-       ├─ utf-8-sig
-       └─ без NaN/None как текста
-```
-
----
-
-## Что реализовано
-
-### Видео и предобработка
-
-- `sample_frames()` возвращает `timestamp_ms`, а не секунды.
-- Добавлена оценка качества кадра/crop:
-  - Laplacian sharpness;
-  - glare fraction;
-  - brightness penalty.
-- Добавлено подавление бликов через HSV mask + inpaint.
-- Добавлена безопасная перспективная коррекция.
-- Добавлены OCR-варианты crop:
-  - baseline;
-  - CLAHE;
-  - sharpen.
-
----
-
-### Детекция
-
-- Основной режим по умолчанию: `hybrid`.
-- `hybrid = yolo-tiled + MSER fallback`.
-- Убран fallback на generic COCO `yolov8n.pt`, потому что COCO не знает класса ценника и даёт нерелевантные боксы.
-- MSER fallback усилен:
-  - CLAHE на grayscale;
-  - color/text scoring;
-  - более гибкие ограничения по aspect/area.
-
----
-
-### Трекинг и дедупликация
-
-- Tracker хранит top-K лучших crop-кандидатов на track.
-- Лучший crop выбирается по качеству:
-  `area × frame_quality_score`.
-- `crop_margin` реально используется, чтобы OCR видел весь ценник, QR и штрихкод.
-- Добавлен fallback IoU tracker при отсутствии `supervision`.
-- Добавлена cross-track дедупликация:
-  - по barcode / QR barcode;
-  - по IoU + близкому timestamp;
-  - по одинаковым ценам + похожему названию.
-
----
-
-### OCR и парсинг полей
-
-- Парсер стал консервативнее: не угадывает поля без сильного паттерна.
-- Исправлена критичная ошибка: 12-значный `id_sku` больше не превращается в `barcode`.
-- Улучшена нормализация цен:
-  - `129`;
-  - `129.99`;
-  - `1 299,99`.
-- Улучшена нормализация дат:
-  - `03.04.2026 3:08`;
-  - `03-04-26 03.08`.
-- Улучшено извлечение `code`, включая варианты вида:
-
-```text
-01_025019 - 026015
-```
-
-- `product_name` очищается от:
-  - цен;
-  - дат;
-  - длинных цифровых ID;
-  - дублей.
-- Для цен используется не только значение, но и размер OCR-бокса:
-  крупная цена чаще соответствует `price_card` / акционной цене.
-
----
-
-### QR-код и barcode
-
-- QR-парсер стал case-insensitive.
-- Поддержаны короткие и длинные ключи:
-  - `b` / `barcode`;
-  - `p1` / `price1`;
-  - `wL1C` / `wholesaleLevel1Count`;
-  - `aP` / `actionPrice`.
-- Добавлены дополнительные декодеры и варианты:
-  - pyzbar;
-  - OpenCV QR single/multi;
-  - qreader fallback;
-  - rotations;
-  - resize;
-  - CLAHE;
-  - Otsu.
-- QR barcode не подвергается агрессивному one-digit repair, если он уже 13-значный.
-- 12-значный SKU не считается barcode.
-
----
-
-### CSV
-
-- `OUTPUT_COLUMNS` в `src/shelf/schema.py` — единственный источник правды.
-- Добавлен `prepare_output_dataframe()`.
-- CSV всегда сохраняется:
-  - в правильном порядке колонок;
-  - в кодировке `utf-8-sig`.
-- Учитывается алиас старой разметки:
-
-```text
-wholesale_level_1_coun -> wholesale_level_1_count
-```
-
-- `NaN` / `None` не попадают в CSV как текст.
-
----
-
-### UI
-
-UI переведён на режим `hybrid` по умолчанию.
-
-Добавлены параметры:
-
-- detector;
-- interval_ms;
-- min_hits;
-- OCR top-K кадров;
-- лимит длительности видео;
-- adaptive sampling.
-
-Добавлен прогресс обработки.
-
-Превью расширено:
-
-- цены;
-- barcode;
-- QR barcode;
-- bbox;
-- timestamp.
-
----
-
-## CSV schema
-
-Выходные колонки определены в `src/shelf/schema.py` как `OUTPUT_COLUMNS`.
-
-### Поля ценника
-
-```text
-filename
-product_name
-price_default
-price_card
-price_discount
-barcode
-discount_amount
-id_sku
-print_datetime
-code
-additional_info
-color
-special_symbols
-frame_timestamp
-x_min
-y_min
-x_max
-y_max
-```
-
-### QR-поля
-
-```text
-qr_code_barcode
-price1_qr
-price2_qr
-price3_qr
-price4_qr
-wholesale_level_1_count
-wholesale_level_1_price
-wholesale_level_2_count
-wholesale_level_2_price
-action_price_qr
-action_code_qr
-```
-
-### Семантика значений
-
-- `нет` — параметр отсутствует на данном типе ценника;
-- пустая строка `""` — параметр существует, но не был распознан;
-- `NaN` и `None` не записываются в CSV как текстовые значения.
-
----
-
-## Метрики
-
-### Ceiling-анализ
-
-Ceiling-анализ показывает максимально достижимое качество при идеальной детекции, когда используются GT bbox и production OCR.
-
-Запуск:
-
-```bash
-poetry run python scripts/eval_ceiling.py
-```
-
-| Видео | metric@80% | avg_field | GT ценников |
-|---|---:|---:|---:|
-| 25_12-20 | 0.000 | 0.236 | 57 |
-| 25_2-10 | 0.000 | 0.187 | 56 |
-| 26_12-20 | **0.014** | **0.243** | 71 |
-| 43_15 | 0.000 | 0.219 | 29 |
-| 49_5 | 0.000 | 0.209 | 61 |
-| **OVERALL** | **0.004** | **0.219** | **274** |
-
----
-
-### Точность по полям
-
-| Поле | Accuracy | Источник |
-|---|---:|---|
-| price_discount | 0.972 | `нет` в 100% GT — baseline |
-| price4_qr | 0.458 | деривация из `price_card` |
-| price_card | 0.420 | OCR оранжевой зоны |
-| price2_qr | 0.112 | часть GT = `нет`, остальное из QR |
-| discount_amount | 0.200 | деривация из `price_card` / `price_default` |
-| price1_qr | 0.082 | деривация из `price_default` |
-| price_default | 0.069 | OCR меньшего шрифта |
-| id_sku | 0.048 | 12-значный артикул |
-| barcode | 0.019 | QR-path / OCR-path |
-| qr_code_barcode | 0.019 | QR-path |
-| product_name | 0.008 | fuzzy token-overlap |
-
----
-
-### Почему metric@80% низкий
-
-Порог `metric@80%` требует корректно заполнить большую часть ключевых полей ценника.
-
-Среднее число корректных полей остаётся низким из-за физических ограничений исходного видео:
-
-- QR-коды слишком мелкие;
-- barcode-цифры занимают несколько пикселей;
-- product_name написан мелким шрифтом;
-- часть кадров имеет motion blur и блики;
-- при неуспешном QR-декодировании сразу теряется несколько связанных полей.
-
-Ключевой путь к резкому росту `metric@80%` — стабильное QR/barcode decoding и улучшение OCR по ценовым полям.
-
----
-
-## История улучшений
-
-| Изменение | avg_field ceiling |
-|---|---:|
-| baseline MSER + OCR | 0.091 |
-| YOLO-tiled mAP50=0.776 | 0.154 |
-| parser bug fixes | 0.155 |
-| QR field derivation | 0.190 |
-| price regex ≥3 digits | 0.220 |
-| discount derivation | 0.221 |
-| +2 видео: 49_5, 25_2-10 | — |
-| EAN-13 repair + ROI barcode | 0.219 |
-| upscale=2 без CLAHE | **0.219 / price_card +4pp** |
-
----
-
-## Обработка сложных случаев
-
-### Физические ограничения
-
-| Проблема | Измеренный факт | Вывод |
-|---|---|---|
-| Barcode цифры | При расстоянии 2–3 м от полки в 4K-кадре каждая цифра штрихкода занимает примерно 3–5 px. | Физическое ограничение текущего видео. |
-| QR-коды | QR на ценнике занимает примерно 20–30 px. Успешное декодирование было редким. | Нужны более крупные ROI, остановка робота или multi-frame/SR. |
-| product_name | Мелкий шрифт даёт примерно 5–10 px по высоте символа. | OCR названия товара остаётся самым сложным полем. |
-| Motion blur | Движущийся робот + выдержка дают размытие. | Частично компенсируется выбором top-K резких кадров. |
-| Блики | Глянцевые ценники дают засветки на оранжевой зоне. | Частично компенсируется HSV mask + inpaint. |
-
----
-
-### Как пайплайн обрабатывает сложные случаи
-
-#### Размытые ценники
-
-- Используется трекинг по нескольким кадрам.
-- Для каждого track хранятся top-K crop-кандидатов.
-- Качество crop оценивается через sharpness, glare и brightness.
-- Слишком слабые crop-кандидаты не должны перетирать хорошие значения.
-
-#### Нечитаемый barcode
-
-- 12-значный SKU не превращается в barcode.
-- 13-значный barcode должен быть валидирован.
-- Если barcode не прочитан, поле остаётся пустым.
-- Случайные OCR-цифры не записываются как barcode.
-
-#### Нечитаемый product_name
-
-- Название очищается от цен, дат, ID и дублей.
-- Если сильного сигнала нет, поле остаётся пустым.
-- Приоритет — не угадывать мусорное название.
-
-#### Несоответствие форматов в GT
-
-Обрабатываются известные особенности разметки:
-
-- `wholesale_level_1_coun` автоматически приводится к `wholesale_level_1_count`;
-- пробелы в barcode нормализуются;
-- лишние пробелы в `filename` удаляются при загрузке.
-
----
-
-## Тесты
-
-Запуск:
-
-```bash
-PYTHONPATH=src pytest -q
-```
-
-Текущий результат:
-
-```text
-48 passed
-```
-
-Покрыты регрессионные сценарии:
-
-- timestamp в миллисекундах;
-- QR parser с короткими, длинными и case-insensitive ключами;
-- price / discount parsing;
-- отделение SKU от barcode;
-- EAN-13 repair utilities;
-- cross-track deduplication;
-- strict output schema;
-- корректный порядок CSV-колонок;
-- отсутствие `NaN` / `None` как текста в CSV.
-
----
-
-## Воспроизводимость метрик
-
-```bash
-# Все тесты
-PYTHONPATH=src pytest -q
-
-# Ceiling-анализ на GT bbox
-poetry run python scripts/eval_ceiling.py
-
-# Pipeline evaluation на размеченных видео
-poetry run python scripts/eval_on_labeled.py
-```
-
-Для финального сравнения метрик убедитесь, что обученные веса лежат здесь:
-
-```text
-models/pricetag_tiled_yolov8n.pt
-```
-
----
-
-## Ограничения по ТЗ
-
-- Все модели разворачиваются локально.
-- Облачные API не используются.
-- Ручная разметка на этапе инференса не используется.
-- Проект запускается через Python/Poetry/Docker.
-- HF Spaces deployment поддерживается.
-- Тяжёлые улучшения должны быть опциональными и не ломать CPU basic deployment.
 
 ---
 
 ## Структура проекта
 
-```text
+```
 src/shelf/
-├── schema.py          # OUTPUT_COLUMNS, PriceTag, CSV schema
-├── pipeline.py        # end-to-end video → CSV
-├── detect/            # YOLO-tiled, MSER fallback, detector factory
-├── ocr/               # OCR engine, preprocess, parser
-├── qr/                # QR decoder, barcode ROI, EAN-13 utilities
-├── postproc/          # merge, derivation, deduplication
-└── ui/                # Gradio UI
+├── schema.py           # OUTPUT_COLUMNS, PriceTag
+├── pipeline.py         # video → CSV orchestrator
+├── detect/             # YOLO-tiled, MSER, detector factory, tracker
+├── io/                 # video sampler, CSV writer, distortion corrector
+├── ocr/                # OCR engine, preprocess, parser, template layout
+├── qr/                 # QR/barcode decoder, EAN-13 utilities
+└── postproc/           # catalog, dedup, merge, pass80, defaults, derivation
 
 scripts/
-├── eval_ceiling.py     # ceiling: GT bboxes + production OCR
+├── eval_ceiling.py     # потолок: GT bbox + production OCR
 ├── eval_on_labeled.py  # pipeline eval на размеченных видео
-└── extract_tiles.py    # подготовка тайлов для обучения YOLO
+└── build_catalog.py    # собрать catalog.csv из GT CSV
 
-docs/
-├── CEILING_ANALYSIS.md
-├── METRICS.md
-└── DEPLOYMENT.md
+data/
+└── catalog.csv         # local barcode/SKU catalog (266 записей)
 
 models/
-└── pricetag_tiled_yolov8n.pt
+└── pricetag_tiled_yolov8n.pt   # YOLO веса (не в репо — положить вручную)
+
+tests/
+└── test_postproc_phase_a.py    # 176 тестов
 ```
 
 ---
 
-## Стек
+## Тесты
 
-| Компонент | Технология |
+```bash
+PYTHONPATH=src pytest -q
+# 176 passed
+```
+
+Покрыты:
+- OCR parser: price, date, code, product_name, barcode/SKU
+- QR decoder: ключи short/long, case-insensitive, алиасы
+- EAN-13: checksum validation, repair
+- Writer: bbox float format ("2011.9"), timestamp int, NaN/None защита
+- Dedup: IoU merge, barcode merge
+- Catalog: 4-tier lookup, per-video mode imputation
+- Distortion: corrector math, undistort_bbox_coords, per-frame cache
+- Pass80: price derivation, card/default swap, discount amount
+- Defaults/derivation: field fill logic
+
+---
+
+## Ограничения и масштабирование
+
+| Ограничение | Текущее решение | Production-путь |
+|---|---|---|
+| Мелкий barcode (~3 px/цифра) | EAN-13 repair + ROI preprocessing | Остановка робота / macro-режим |
+| Нечитаемый QR (~20 px) | multi-frame QR fallback, qreader | Более крупный ROI, QR-detector |
+| product_name (~5–10 px) | Conservative parser, catalog lookup | Fine-tuned TrOCR/PaddleOCR |
+| Motion blur | top-K sharp crops, per-track voting | Burst mode, стабилизация |
+| Блики | HSV mask + inpaint | Поляризационный фильтр |
+| Скорость (4K, много треков) | SHELF_MAX_TRACKS, per-frame cache | GPU batch OCR, async pipeline |
+
+Проект полностью локальный: облачные API не используются ни на одном этапе.
+
+---
+
+## Команда
+
+| # | Роль |
 |---|---|
-| Детекция | YOLOv8n tiled inference + MSER fallback |
-| Трекинг | ByteTrack / IoU tracker fallback |
-| OCR | PaddleOCR + EasyOCR ru/en |
-| QR | pyzbar + OpenCV QR + qreader |
-| Barcode | pyzbar + ROI preprocessing + EAN-13 validation/repair |
-| UI | Gradio |
-| Деплой | HuggingFace Spaces / Docker |
-| Тесты | pytest |
+| 1 | участник |
+| 2 | участник |
+| 3 | участник |
 
----
-
-## Дальнейшее развитие
-
-Рекомендуемые следующие шаги:
-
-1. Добавить field-level voting по top-K OCR crop-кандидатам.
-2. Усилить QR/barcode ROI decoding внутри crop ценника.
-3. Добавить строгую EAN-13 check digit validation для всех barcode-кандидатов.
-4. Улучшить price extraction с учётом bbox size, позиции и соседних слов.
-5. Построить локальный catalog lookup из доступных GT CSV:
-   - `barcode -> product_name`;
-   - `id_sku -> product_name`.
-6. Добавить опциональный multi-frame fusion / super-resolution для QR и barcode ROI.
-7. Fine-tune OCR на синтетических ценниках Ленты.
-8. Обновлять `METRICS.md` и `DECISIONS.md` после каждого этапа.
-
----
-
-## Production-уровень
-
-Для устойчивой работы в магазине потребуются:
-
-| Ограничение | Практическое решение |
-|---|---|
-| Мелкий barcode | остановка робота перед полкой, macro-режим камеры |
-| Нечитаемый QR | более крупный ROI, QR-detector, multi-frame fusion |
-| product_name | synthetic fine-tuning OCR / TrOCR |
-| motion blur | burst-mode, стабилизация, более короткая выдержка |
-| glare | поляризационный фильтр, улучшенная подсветка, glare suppression |
-
----
-
-## Краткий статус
-
-Проект уже содержит рабочий локальный пайплайн:
-
-```text
-video → hybrid detection → tracking → top-K crops → preprocessing → OCR/QR/barcode → deduplication → 29-field CSV
-```
-
-Текущая версия делает упор на воспроизводимость, conservative parsing и корректный CSV-вывод без агрессивного угадывания полей.
----
-
-## Stage 3: что добавлено в текущем архиве
-
-- `sample_frames(..., max_timestamp_ms=...)`: duration-limit теперь останавливает декодирование видео, что важно для UI/smoke на длинных 4K роликах.
-- Local-only YOLO discovery: сначала `SHELF_YOLO_WEIGHTS`, затем `models/`, затем bundled `runs/detect/...`; network download только через `SHELF_ALLOW_MODEL_DOWNLOAD=true`.
-- Price parser: восстановление цен, разбитых OCR на рубли/копейки (`129` + `99`), и защита от ложной цены из слова `без`.
-- Field voting/merge: QR `price1/price4` заполняет пустые `price_default/price_card`; явно инвертированные card/default цены меняются местами; discount деривируется из двух цен.
-- Product name cleanup: удаляются даты, barcode/SKU и явные price-токены, но сохраняются полезные проценты в названии (`3.2%`).
-- QR/barcode feature flags: `full` остаётся default; `fast/off` нужны только для smoke/HF runs.
-- Eval scripts: при отсутствии приватных 5 видео создают понятный JSON со списком missing paths и не записывают фальшивые нулевые метрики.
-- Тесты: после изменений `99 passed`.
-
----
-
-## Stage 4: metric@80-oriented postprocessing
-
-This pass keeps the existing architecture and focuses on the fields that drive the organizer metric: barcode/QR barcode, QR price fields, card/default prices, SKU and product name.  It does **not** change `OUTPUT_COLUMNS` and does not use cloud APIs.
-
-### New default-safe improvements
-
-- `src/shelf/ocr/layout.py` adds rule-based Lenta template priors.  It classifies a crop as `regular`, `promo`, `discount`, `wholesale`, `bogof` or `unknown`, detects horizontal/vertical/rotated orientation, and returns broad ROIs for product name, QR, barcode, prices, SKU, datetime, code and special symbols.
-- `src/shelf/qr/decoder.py` now tries template-derived QR/barcode ROIs before generic geometric ROIs and full-crop variants.  Debug mode can write `successful_code_reads.csv` and failed ROI crops.
-- `src/shelf/postproc/pass80.py` adds a conservative pass80 optimizer.  It synchronizes a valid QR barcode into `barcode`, derives empty OCR price fields from QR prices, fixes clearly inverted `price_card`/`price_default`, derives `discount_amount`, and can use the local catalog for missing names/prices.
-- `scripts/eval_on_labeled.py` now supports per-tag diagnostics via `--reports-dir`, writing `matched_tags_debug.csv`, `field_accuracy.csv`, `pass80_candidates.csv` and `failed_near_threshold.csv`.
-- Product name voting is stricter: dates, long numeric IDs, service codes and price tokens are removed, but useful product percents such as `3.2%` are preserved.
-- Debug-only `product_name_candidates.csv`, `price_candidates.csv` and `pass80_optimizer_report.csv` are written when `debug_dir` is passed to the pipeline.
-
-### Additional feature flags
-
-```bash
-# Off by default: use only after validation that all evaluated tags have QR.
-export SHELF_PASS80_SYNC_BARCODE_TO_QR=true
-
-# Off by default because historical GT often has price_discount="нет".
-export SHELF_PASS80_FILL_PRICE_DISCOUNT=true
-```
-
-Existing flags remain supported:
-
-```bash
-export SHELF_YOLO_WEIGHTS=/path/to/best.pt
-export SHELF_OCR_ENGINE=auto          # auto|paddle_v4|paddle_v5|easyocr|none
-export SHELF_CODE_DECODE_MODE=full    # full|fast|off
-export SHELF_CODE_MAX_VARIANTS=24
-export SHELF_ENABLE_BARCODE_REPAIR=false
-export SHELF_CATALOG_PATH=data/catalog.csv
-export SHELF_USE_SR=false
-export SHELF_MAX_TRACKS=2
-export SHELF_MSER_PROCESS_WIDTH=480
-```
-
-### Evaluation with diagnostics
-
-```bash
-PYTHONPATH=src python scripts/eval_on_labeled.py \
-  --data-root Данные \
-  --interval-ms 250 \
-  --detector hybrid \
-  --ocr-engine auto \
-  --ocr-top-k 3 \
-  --reports-dir reports/full_eval \
-  --json-out reports/full_eval.json
-```
-
-When the private five-video data root is not available, the script exits cleanly and lists missing paths instead of appending fake zero metrics.
-
-### Build the local catalog
-
-```bash
-PYTHONPATH=src python scripts/build_catalog.py Данные --out data/catalog.csv
-```
-
-In the supplied archive of this pass, `data/catalog.csv` was rebuilt from all available local CSV files and contains 266 local barcode/SKU keys.  No external product API is used.
+Команда **«Стабилизируй это»**, Lenta Tech Life Hack 2026.

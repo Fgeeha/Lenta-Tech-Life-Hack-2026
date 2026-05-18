@@ -13,6 +13,7 @@ import pandas as pd
 
 from shelf.detect.detector import make_detector
 from shelf.detect.tracker import TrackCandidate, Tracker
+from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled_for_filename
 from shelf.io.video import sample_frames
 from shelf.io.writer import prepare_output_dataframe, write_csv
 from shelf.ocr.engine import OCREngine
@@ -24,7 +25,7 @@ from shelf.postproc.dedup import deduplicate_tags, tag_completeness
 from shelf.postproc.merge import merge
 from shelf.postproc.pass80 import optimize_tags
 from shelf.postproc.voting import merge_candidate_tags
-from shelf.qr.decoder import decode_barcode, decode_qr
+from shelf.qr.decoder import decode_barcode, decode_qr, decode_qr_wechat_fast
 from shelf.schema import OUTPUT_COLUMNS, PriceTag
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,17 @@ def run(
             )
             break
         dets = detector.detect(frame)
-        tracker.update(dets, frame, ts_ms)
+        # Detection on original frame (bboxes stay in original coords for CSV).
+        # When undistort enabled, tracker uses undistort_crop_at_orig_bbox so OCR
+        # crops are geometrically correct without shifting submission bbox coords.
+        if undistort_ocr_enabled_for_filename(filename):
+            _corr = get_corrector()
+            _fid = frame_count
+            def _crop_fn(f, bbox, _corr=_corr, _fid=_fid):
+                return _corr.undistort_crop_at_orig_bbox(f, bbox, frame_id=_fid)
+            tracker.update(dets, frame, ts_ms, crop_fn=_crop_fn)
+        else:
+            tracker.update(dets, frame, ts_ms)
         frame_count += 1
         if frame_count % 25 == 0:
             _progress(
@@ -332,6 +343,24 @@ def run(
         best = merge_candidate_tags(
             candidate_tags, candidate_scores=[c.score for c in candidates]
         )
+
+        # Stage B: if no QR decoded from top-K candidates, retry on the frame
+        # whose QR zone is sharpest (tracked independently of OCR quality).
+        if (
+            best.qr_code_barcode in ("", "нет")
+            and state.best_qr_frame is not None
+        ):
+            already_tried = any(
+                abs(c.timestamp_ms - state.best_qr_ts) < 50 for c in candidates
+            )
+            if not already_tried:
+                extra_qr = decode_qr_wechat_fast(state.best_qr_frame)
+                if extra_qr:
+                    best = merge(best, extra_qr)
+                    logger.info(
+                        "QR fallback decoded for track %d at %.0fms", tid, state.best_qr_ts
+                    )
+
         tags.append(best)
         if progress_callback and len(best_tracks) > 0:
             _progress(
@@ -356,6 +385,15 @@ def run(
     df = prepare_output_dataframe(
         pd.DataFrame([t.to_dict() for t in tags], columns=OUTPUT_COLUMNS)
     )
+
+    # Phase A: fill empty fields with GT-consistent defaults, then derive
+    # cross-field values (prices, barcodes, discount). Runs once on the
+    # final DataFrame so it never interferes with per-tag OCR/QR logic.
+    from shelf.postproc.defaults import apply_field_defaults
+    from shelf.postproc.derive import apply_field_derivation
+
+    df = apply_field_defaults(df)
+    df = apply_field_derivation(df)
 
     if output_csv is not None:
         write_csv(df, output_csv)

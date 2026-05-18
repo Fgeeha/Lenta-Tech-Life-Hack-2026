@@ -6,6 +6,8 @@ import csv
 import logging
 import os
 import re
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlparse
 
@@ -17,6 +19,34 @@ from shelf.qr.barcode_roi import ean13_repair
 from shelf.validation import normalize_ean13
 
 logger = logging.getLogger(__name__)
+
+
+class _NativeTimeout(Exception):
+    """Raised when SIGALRM fires inside a native QR/barcode call."""
+
+
+@contextmanager
+def _alarm_timeout(seconds: float):
+    """Hard timeout via SIGALRM. Unix-only, main thread only."""
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(signum, frame):
+        raise _NativeTimeout()
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+# Configurable per-call timeouts (override via env vars).
+_WECHAT_TIMEOUT = float(os.getenv("SHELF_WECHAT_QR_TIMEOUT", "2.0"))
+_QREADER_TIMEOUT = float(os.getenv("SHELF_QREADER_TIMEOUT", "4.0"))
 
 # Canonical lower-case key -> schema field. ``parse_qr_url`` is case-insensitive.
 _KEY_MAP: dict[str, str] = {
@@ -298,15 +328,105 @@ def _try_opencv(image: np.ndarray) -> list[str]:
     return out
 
 
-def _try_qreader(image: np.ndarray) -> list[str]:
-    try:
-        from qreader import QReader
+_QREADER: object | None = None
 
-        reader = QReader()
-        decoded = reader.detect_and_decode(image=image)
+
+def _get_qreader():
+    """Lazy-create and cache QReader (avoids re-loading YOLO weights on every call)."""
+    global _QREADER
+    if _QREADER is None:
+        try:
+            from qreader import QReader
+
+            _QREADER = QReader()
+        except Exception as exc:
+            logger.debug("QReader init failed: %s", exc)
+            _QREADER = False
+    return _QREADER if _QREADER else None
+
+
+def _try_qreader(image: np.ndarray) -> list[str]:
+    reader = _get_qreader()
+    if reader is None:
+        return []
+    try:
+        with _alarm_timeout(_QREADER_TIMEOUT):
+            decoded = reader.detect_and_decode(image=image)
         return [x for x in decoded if x]
+    except _NativeTimeout:
+        logger.warning("qreader timeout %.1fs", _QREADER_TIMEOUT)
+        return []
     except Exception as exc:
         logger.debug("qreader error: %s", exc)
+        return []
+
+
+_WECHAT_QR: "cv2.wechat_qrcode_WeChatQRCode | None" = None
+_BARCODE_DETECTOR: "cv2.barcode.BarcodeDetector | None" = None
+
+
+def _get_wechat_qr() -> "cv2.wechat_qrcode_WeChatQRCode | None":
+    global _WECHAT_QR
+    if _WECHAT_QR is None:
+        try:
+            _WECHAT_QR = cv2.wechat_qrcode_WeChatQRCode()
+        except Exception as exc:
+            logger.debug("WeChatQR init failed: %s", exc)
+    return _WECHAT_QR
+
+
+def _try_wechat_qr(image: np.ndarray) -> list[str]:
+    """Decode QR with WeChatQR + hard timeout to prevent native hang."""
+    reader = _get_wechat_qr()
+    if reader is None:
+        return []
+    try:
+        with _alarm_timeout(_WECHAT_TIMEOUT):
+            decoded, _ = reader.detectAndDecode(image)
+            return [d for d in decoded if d]
+    except _NativeTimeout:
+        shape = image.shape if image is not None else None
+        logger.warning("WeChatQR timeout %.1fs shape=%s", _WECHAT_TIMEOUT, shape)
+        return []
+    except Exception as exc:
+        logger.debug("WeChatQR decode error: %s", exc)
+        return []
+
+
+def _get_barcode_detector() -> "cv2.barcode.BarcodeDetector | None":
+    global _BARCODE_DETECTOR
+    if _BARCODE_DETECTOR is None:
+        try:
+            _BARCODE_DETECTOR = cv2.barcode.BarcodeDetector()
+        except Exception as exc:
+            logger.debug("BarcodeDetector init failed: %s", exc)
+    return _BARCODE_DETECTOR
+
+
+def _try_zxingcpp(image: np.ndarray) -> list[str]:
+    """Decode barcodes using zxing-cpp (tolerant of blur, rotation, perspective)."""
+    try:
+        import zxingcpp  # type: ignore
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        results = zxingcpp.read_barcodes(gray)
+        return [r.text for r in results if r.valid and r.text]
+    except Exception:
+        return []
+
+
+def _try_opencv_barcode(image: np.ndarray) -> list[str]:
+    """Decode linear barcodes using OpenCV BarcodeDetector (more robust than pyzbar on blurry crops)."""
+    detector = _get_barcode_detector()
+    if detector is None:
+        return []
+    try:
+        retval, decoded_info, _, _ = detector.detectAndDecodeWithType(image)
+        if retval and decoded_info:
+            return [d for d in decoded_info if d]
+        return []
+    except Exception as exc:
+        logger.debug("OpenCV BarcodeDetector error: %s", exc)
         return []
 
 
@@ -469,6 +589,63 @@ def _barcode_roi_variants(crop: np.ndarray) -> list[np.ndarray]:
     return [img for _, img in _named_roi_variants(crop, "barcode")]
 
 
+def _preprocess_for_glare(roi: np.ndarray) -> list[np.ndarray]:
+    """Return glare-resistant variants of a QR ROI for WeChatQR retry.
+
+    Called only after the standard WeChatQR attempt already failed, so the
+    extra latency (2 CLAHE + 1 bilateral pass) only affects undecoded crops.
+    """
+    if roi is None or roi.size == 0:
+        return []
+    variants: list[np.ndarray] = []
+    # CLAHE in LAB — lifts shadow detail and suppresses bright-spot clipping.
+    try:
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        variants.append(
+            cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+        )
+    except Exception:
+        pass
+    # Bilateral filter — reduces glare while preserving QR module edges.
+    try:
+        variants.append(cv2.bilateralFilter(roi, d=9, sigmaColor=75, sigmaSpace=75))
+    except Exception:
+        pass
+    # Inverted image — helps when glare turns dark QR modules white.
+    variants.append(cv2.bitwise_not(roi))
+    return variants
+
+
+def decode_qr_wechat_fast(crop: np.ndarray) -> dict[str, str]:
+    """Lightweight WeChatQR scan: 90°CCW rotation + top-right QR zone at 4× zoom.
+
+    Used for multi-frame fallback scans where running the full decode_qr()
+    cascade (~4.8 s per fail) is too expensive.  Each call takes ≈0.05–0.2 s.
+    Returns parsed QR URL fields (qr_code_barcode, price1_qr …) or {}.
+    """
+    if crop is None or crop.size == 0:
+        return {}
+    rot = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    rh, rw = rot.shape[:2]
+    qr_zone = rot[: int(rh * 0.60), int(rw * 0.40) :]
+    if qr_zone.size == 0:
+        return {}
+    qzh, qzw = qr_zone.shape[:2]
+    for scale in (4.0, 2.0):
+        zoomed = cv2.resize(
+            qr_zone,
+            (max(1, int(qzw * scale)), max(1, int(qzh * scale))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        for raw in _try_wechat_qr(zoomed):
+            parsed = _raw_to_fields(raw)
+            if parsed:
+                return parsed
+    return {}
+
+
 def _raw_to_fields(raw: str) -> dict[str, str]:
     raw = str(raw).strip()
     if not raw:
@@ -505,20 +682,99 @@ def decode_qr(
     if crop is None or crop.size == 0 or _decode_mode() == "off":
         return {}
 
-    # Fast pass on the original crop before generating many variants.
-    for raw in _try_pyzbar(crop) + _try_opencv(crop):
-        parsed = _raw_to_fields(raw)
-        if parsed:
-            _log_success(
-                debug_dir,
-                track_id=track_id,
-                timestamp_ms=timestamp_ms,
-                source="qr_full_original",
-                raw=raw,
-                normalized=_success_value(parsed),
-                roi_type="full",
+    _fast_rotations = [
+        ("orig", crop),
+        ("rot90ccw", cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+        ("rot180", cv2.rotate(crop, cv2.ROTATE_180)),
+        ("rot90cw", cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)),
+    ]
+
+    # Step 1: WeChatQR on template QR ROIs (2× and 4× zoom) — runs FIRST because
+    # it returns the full QR URL (barcode + all price fields) whereas pyzbar only
+    # reads the linear EAN-13 barcode strip.  Only 2 rotations tried: Lenta tags
+    # are always mounted at 90° (DECISIONS.md 2026-05-13), so rot180/rot90cw are
+    # redundant and each wastes up to SHELF_WECHAT_QR_TIMEOUT seconds on failure.
+    _wechat_rotations = [
+        ("orig", crop),
+        ("rot90ccw", cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+    ]
+    # Only try the primary QR ROI at 4× zoom — the Lenta QR pattern is always
+    # in the top-right after 90°-CCW rotation (~40 px → 160 px is decodable).
+    # 2x was never the first to succeed and adding more ROIs/scales multiplies
+    # timeout budget (each _try_wechat_qr call may hang up to SHELF_WECHAT_QR_TIMEOUT).
+    for rot_name, rot_img in _wechat_rotations:
+        rois = _named_template_rois(rot_img, {"qr"})
+        if not rois:
+            continue
+        roi_name, roi = rois[0]
+        if roi is None or roi.size == 0:
+            continue
+        h_r, w_r = roi.shape[:2]
+        zoomed = cv2.resize(
+            roi,
+            (max(1, int(w_r * 4.0)), max(1, int(h_r * 4.0))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        for raw in _try_wechat_qr(zoomed):
+            parsed = _raw_to_fields(raw)
+            if parsed:
+                _log_success(
+                    debug_dir,
+                    track_id=track_id,
+                    timestamp_ms=timestamp_ms,
+                    source="qr_wechat_roi",
+                    raw=raw,
+                    normalized=_success_value(parsed),
+                    roi_type=f"{rot_name}:{roi_name}:x4",
+                )
+                return parsed
+
+    # Step 1b: anti-glare retry — only runs when Step 1 failed.
+    # Applies CLAHE/bilateral/invert to the same QR ROI before giving up.
+    for rot_name, rot_img in _wechat_rotations:
+        rois = _named_template_rois(rot_img, {"qr"})
+        if not rois:
+            continue
+        roi_name, roi = rois[0]
+        if roi is None or roi.size == 0:
+            continue
+        h_r, w_r = roi.shape[:2]
+        for glare_variant in _preprocess_for_glare(roi):
+            zoomed = cv2.resize(
+                glare_variant,
+                (max(1, int(w_r * 4.0)), max(1, int(h_r * 4.0))),
+                interpolation=cv2.INTER_CUBIC,
             )
-            return parsed
+            for raw in _try_wechat_qr(zoomed):
+                parsed = _raw_to_fields(raw)
+                if parsed:
+                    _log_success(
+                        debug_dir,
+                        track_id=track_id,
+                        timestamp_ms=timestamp_ms,
+                        source="qr_wechat_antiglare",
+                        raw=raw,
+                        normalized=_success_value(parsed),
+                        roi_type=f"{rot_name}:{roi_name}:antiglare:x4",
+                    )
+                    return parsed
+
+    # Step 2: cheap decoders on full crop (pyzbar reads linear EAN-13 barcode
+    # strip; returns only barcode number without price fields).
+    for rot_name, rot_img in _fast_rotations:
+        for raw in _try_pyzbar(rot_img) + _try_opencv(rot_img):
+            parsed = _raw_to_fields(raw)
+            if parsed:
+                _log_success(
+                    debug_dir,
+                    track_id=track_id,
+                    timestamp_ms=timestamp_ms,
+                    source="qr_fast_cheap",
+                    raw=raw,
+                    normalized=_success_value(parsed),
+                    roi_type=rot_name,
+                )
+                return parsed
 
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
     for source, img in _named_roi_variants(crop, "qr")[:roi_limit]:
@@ -596,7 +852,7 @@ def decode_barcode(
         return ""
     roi_limit = _variant_limit(default_full=10_000, default_fast=24)
     for source, img in _named_roi_variants(crop, "barcode")[:roi_limit]:
-        for raw in _try_pyzbar(img):
+        for raw in _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)
@@ -622,7 +878,7 @@ def decode_barcode(
         return ""
     full_limit = _variant_limit(default_full=10_000, default_fast=12)
     for idx, img in enumerate(_image_variants(crop)[:full_limit]):
-        for raw in _try_pyzbar(img):
+        for raw in _try_pyzbar(img) + _try_opencv_barcode(img) + _try_zxingcpp(img):
             digits = re.sub(r"\D", "", raw)
             if 8 <= len(digits) <= 15:
                 normalized = _normalize_barcode(digits, strict=True)

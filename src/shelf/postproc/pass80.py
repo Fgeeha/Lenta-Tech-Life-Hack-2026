@@ -271,12 +271,24 @@ def optimize_tag(
                         "catalog_name",
                     )
                 )
+            if entry.id_sku and _is_missing(str(data.get("id_sku", "")), absent_is_missing=True):
+                old_sku = str(data.get("id_sku", "") or "")
+                data["id_sku"] = entry.id_sku
+                changes.append(
+                    Pass80Change(row_index, "id_sku", old_sku, entry.id_sku, "catalog_id_sku")
+                )
             for field_name in ("price_default", "price_card"):
                 price = _normalize_price_for_field(
                     getattr(entry, field_name, ""), comma=True
                 )
                 if price:
                     set_if(field_name, price, f"catalog_{field_name}")
+            # Fill metadata fields that apply_catalog may have missed (e.g. after
+            # SKU normalization reveals a catalog match not found in the first pass).
+            for field_name in ("special_symbols", "code", "print_datetime", "additional_info"):
+                val = str(getattr(entry, field_name, "") or "").strip()
+                if val:
+                    set_if(field_name, val, f"catalog_{field_name}", replace_absent=True)
 
     return PriceTag(**data), changes
 

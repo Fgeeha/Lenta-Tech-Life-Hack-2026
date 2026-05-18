@@ -26,16 +26,16 @@ _MIN_H = 50
 
 @dataclass
 class Detection:
-    x_min: int
-    y_min: int
-    x_max: int
-    y_max: int
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
     confidence: float
     cls_name: str = "tag"
 
     @property
     def area(self) -> int:
-        return max(0, self.x_max - self.x_min) * max(0, self.y_max - self.y_min)
+        return max(0, int(self.x_max - self.x_min)) * max(0, int(self.y_max - self.y_min))
 
     @property
     def aspect(self) -> float:
@@ -51,10 +51,10 @@ class Detection:
 
     def clipped(self, width: int, height: int) -> "Detection":
         return Detection(
-            x_min=max(0, min(width - 1, int(self.x_min))),
-            y_min=max(0, min(height - 1, int(self.y_min))),
-            x_max=max(0, min(width, int(self.x_max))),
-            y_max=max(0, min(height, int(self.y_max))),
+            x_min=max(0.0, min(float(width - 1), float(self.x_min))),
+            y_min=max(0.0, min(float(height - 1), float(self.y_min))),
+            x_max=max(0.0, min(float(width), float(self.x_max))),
+            y_max=max(0.0, min(float(height), float(self.y_max))),
             confidence=float(self.confidence),
             cls_name=self.cls_name,
         )
@@ -145,10 +145,10 @@ class MSERDetector:
 
         dets: list[Detection] = []
         for x, y, bw, bh in bboxes:
-            orig_x = int(x / scale)
-            orig_y = int(y / scale)
-            orig_w = int(bw / scale)
-            orig_h = int(bh / scale)
+            orig_x = x / scale
+            orig_y = y / scale
+            orig_w = bw / scale
+            orig_h = bh / scale
             det = Detection(
                 orig_x,
                 orig_y,
@@ -162,7 +162,7 @@ class MSERDetector:
                 continue
 
             # Boost rectangular regions with orange/yellow/red background typical for price tags.
-            crop = frame[det.y_min : det.y_max, det.x_min : det.x_max]
+            crop = frame[int(det.y_min) : int(det.y_max), int(det.x_min) : int(det.x_max)]
             color_boost = _price_tag_color_score(crop)
             text_boost = _text_edge_score(crop)
             det.confidence = min(
@@ -183,12 +183,12 @@ class MSERDetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 255, 0), 6
+                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (0, 255, 0), 6
             )
             cv2.putText(
                 out,
                 f"{d.cls_name} {d.confidence:.2f}",
-                (d.x_min, max(40, d.y_min - 10)),
+                (int(d.x_min), max(40, int(d.y_min) - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.5,
                 (0, 255, 0),
@@ -245,10 +245,10 @@ class YOLODetector:
             conf = float(box.conf[0])
             cls_name = results.names.get(int(box.cls[0]), "tag")
             det = Detection(
-                int(x1 / scale),
-                int(y1 / scale),
-                int(x2 / scale),
-                int(y2 / scale),
+                x1 / scale,
+                y1 / scale,
+                x2 / scale,
+                y2 / scale,
                 conf,
                 cls_name,
             ).clipped(w, h)
@@ -262,12 +262,12 @@ class YOLODetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (d.x_min, d.y_min), (d.x_max, d.y_max), (255, 100, 0), 6
+                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (255, 100, 0), 6
             )
             cv2.putText(
                 out,
                 f"{d.cls_name} {d.confidence:.2f}",
-                (d.x_min, max(40, d.y_min - 10)),
+                (int(d.x_min), max(40, int(d.y_min) - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.5,
                 (255, 100, 0),
@@ -345,12 +345,12 @@ class HybridDetector:
         out = frame.copy()
         for d in detections:
             cv2.rectangle(
-                out, (d.x_min, d.y_min), (d.x_max, d.y_max), (0, 220, 255), 6
+                out, (int(d.x_min), int(d.y_min)), (int(d.x_max), int(d.y_max)), (0, 220, 255), 6
             )
             cv2.putText(
                 out,
                 f"hybrid {d.confidence:.2f}",
-                (d.x_min, max(40, d.y_min - 10)),
+                (int(d.x_min), max(40, int(d.y_min) - 10)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.5,
                 (0, 220, 255),
