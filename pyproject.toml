@@ -14,6 +14,7 @@ pandas = ">=2.0,<3"
 gradio = ">=5.0,<6"
 Pillow = ">=10,<12"
 easyocr = ">=1.7,<2"
+zxing-cpp = "^3.0.0"
 
 [tool.poetry.group.ml.dependencies]
 ultralytics = ">=8.2,<9"

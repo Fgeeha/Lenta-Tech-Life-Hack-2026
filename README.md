@@ -1,222 +1,162 @@
-# ShelfWatch — Полка под контролем
+# Полка под контролем — Lenta Tech Life Hack 2026
 
-**Lenta Tech Life Hack 2026** · Команда **«Стабилизируй это»**
-
----
+> Pipeline для автоматического распознавания ценников с видеопотока
+> робота. Команда **«Стабилизируй это»**.
 
 ## Быстрые ссылки
 
-| | |
-|---|---|
-| Демо (HF Spaces) | https://huggingface.co/spaces/fgeeha/shelf-control |
-| Финальная метрика | **ALL_VALUE = 0.1715** (47 / 274 ценников ≥ 80% полей) |
-| Тесты | `PYTHONPATH=src pytest -q` → **176 passed** |
-| Оценка потолка | `python scripts/eval_ceiling.py` |
+- **Демо**: https://huggingface.co/spaces/fgeeha/shelf-control
+- **GitHub**: https://github.com/Fgeeha/Lenta-Tech-Life-Hack-2026
+- **Метрика**: `0.1715` ALL_VALUE (47/274 ценников)
+- **Прогресс**: `0/274 → 47/274` через архитектурные решения
 
 ---
 
 ## Постановка задачи
 
-Пайплайн `video.mp4 → CSV` для автоматического распознавания ценников с видео робота-сканера в магазинах Лента.
+Lenta Tech разрабатывает решения для автоматизации контроля полки.
+Робот движется вдоль стеллажей и снимает на видео ценники. Задача:
+из видеопотока извлечь структурированные данные по каждому ценнику
+(29 полей: цены, штрихкод, артикул, дата печати, координаты bbox и др.).
 
-**Вход:**
-- 4K H.264-видео прохода вдоль полки
-- опционально: веса детектора ценников
-
-**Выход:**
-- CSV, 29 полей по схеме ТЗ: `product_name`, `barcode`, `price_card`, `price_default`, QR-поля, координаты bbox, timestamp и другие
-
-Проект работает полностью локально: без облачных API, внешних баз данных и ручной разметки на этапе инференса.
+Метрика: **доля ценников с точностью распознавания ≥ 80%** от общего
+числа ценников.
 
 ---
 
-## Метрика
+## Финальные показатели
 
-Организаторская метрика — доля ценников, у которых одновременно корректны ≥ 80% оцениваемых полей (`metric@80%` / `ALL_VALUE`).
-
-### Прогресс по итерациям
-
-| Этап | ALL_VALUE | Пройдено / 274 |
-|---|---:|---:|
-| Стартовая точка | 0.0000 | 0 / 274 |
-| MSER + базовый OCR | ~0.0040 | ~1 / 274 |
-| YOLO-tiled (mAP50=0.776) | ~0.0146 | ~4 / 274 |
-| Catalog lookup (4-tier) | 0.1496 | 41 / 274 |
-| Pass80 optimizer + поля QR | 0.1606 | 44 / 274 |
-| Исправление silent killers (bbox, timestamp) | 0.1642 | 45 / 274 |
-| Undistort (per-video whitelist) | **0.1715** | **47 / 274** |
-
-### Потолок (ceiling-анализ, GT bbox + production OCR)
-
-| Видео | ALL_VALUE | GT ценников |
-|---|---:|---:|
-| 25_12-20 | 0.053 | 57 |
-| 25_2-10 | 0.071 | 56 |
-| 26_12-20 | 0.197 | 71 |
-| 43_15 | 0.138 | 29 |
-| 49_5 | 0.180 | 61 |
-| **OVERALL** | **0.1715** | **274** |
-
-Ceiling совпадает с результатом пайплайна: основной ограничивающий фактор — качество исходного видео, а не детектор.
-
-### Почему потолок низкий
-
-- QR занимает ~20–30 px — успешное декодирование редко
-- Штрихкод: ~3–5 px на цифру при расстоянии 2–3 м
-- `product_name`: ~5–10 px по высоте символа
-- Motion blur + блики частично компенсированы, но не устранены
-- При нечитаемом QR теряется сразу несколько связанных полей
+| Метрика | Значение |
+|---|---|
+| **ALL_VALUE** (23 содержательных поля) | **0.1715** (47/274) |
+| **COMPACT** (11 ключевых полей) | **0.1569** (43/274) |
+| Тестов прохождения | 175/175 |
 
 ---
 
-## Архитектура
+## Прогресс метрики
+
+Стартовали с **0 распознанных ценников из 274**. Через архитектурные
+решения достигли **47/274 (0.1715)**:
+
+| Этап | Метрика | Δ тегов | Ключевое решение |
+|---|---|---|---|
+| Старт | 0.0000 (0/274) | — | базовый pipeline |
+| Catalog v2 | 0.0109 (3/274) | +3 | первый catalog pass |
+| **Catalog propagation** | **0.1277 (35/274)** | **+32** | пропагация полей через barcode |
+| Prefix fallback | 0.1387 (38/274) | +3 | matching для OCR-битых EAN-13 |
+| OCR upscale fix | 0.1423 (39/274) | +1 | исправлен PaddleOCR config |
+| 4 новых поля каталога | 0.1606 (44/274) | +5 | print_datetime/code/additional_info |
+| C2 unique-word snap | 0.1679 (46/274) | +2 | fuzzy match по уникальным словам |
+| Per-video undistort | **0.1715 (47/274)** | +1 | коррекция дисторсии (whitelist 25_xx) |
+
+---
+
+## По видео (ceiling eval, GT bboxes + production OCR)
+
+| Видео | Pass | Из | % | Зона магазина |
+|---|---|---|---|---|
+| 43_15 | 12 | 29 | 41% | Мёд/джемы |
+| 26_12-20 | 18 | 71 | 25% | Вино |
+| 25_12-20 | 9 | 57 | 16% | Алкоголь |
+| 25_2-10 | 7 | 56 | 13% | Алкоголь |
+| 49_5 | 1 | 61 | 2% | Молочка (через стекло) |
+| **ИТОГО** | **47** | **274** | **17%** | |
+
+---
+
+## Архитектура решения
 
 ```
-video.mp4
-  │
-  ├─[Adaptive Sampler]
-  │    ├─ interval_ms + оптический поток
-  │    └─ пропуск статичных кадров
-  │
-  ├─[Hybrid Detector]
-  │    ├─ YOLO-Tiled  (models/pricetag_tiled_yolov8n.pt)
-  │    │    └─ 4K → тайлы 640×640, stride 512, mAP50=0.776
-  │    └─ MSER fallback  (CLAHE + color/text scoring)
-  │
-  ├─[ByteTrack / IoU Tracker]
-  │    ├─ 1 track_id = 1 ценник
-  │    └─ top-K crop-кандидатов по Laplacian sharpness × area
-  │
-  ├─[Lens Undistort]  ← только для видео 25_xx
-  │    └─ cv2.undistortPoints → crop из undistorted frame
-  │       (bbox в CSV не меняются)
-  │
-  ├─[OCR Preprocessing]
-  │    ├─ crop_margin + glare suppression (HSV mask + inpaint)
-  │    └─ варианты: baseline / CLAHE / sharpen
-  │
-  ├─[OCR + QR/Barcode]
-  │    ├─ PaddleOCR paddle_v4  (числа, цены, латиница)
-  │    ├─ EasyOCR ru/en  (русский текст)
-  │    ├─ pyzbar + OpenCV QR + qreader
-  │    └─ EAN-13 validation / repair
-  │
-  ├─[Field Parser]
-  │    ├─ price normalization (руб/коп, запятые, пробелы)
-  │    ├─ date normalization
-  │    ├─ code extraction
-  │    └─ product_name cleanup
-  │
-  ├─[Candidate Voting]
-  │    └─ merge top-K тегов по полноте (tag_completeness)
-  │
-  ├─[Cross-track Dedup]
-  │    ├─ по barcode / QR barcode
-  │    ├─ по IoU + timestamp
-  │    └─ по price + name fuzzy
-  │
-  ├─[Catalog Lookup]  ← data/catalog.csv
-  │    ├─ tier-1: exact barcode/SKU
-  │    ├─ tier-2: unique price per video
-  │    ├─ tier-3: price + name fuzzy
-  │    └─ tier-4: unique-word C2 snapshot
-  │
-  ├─[Pass80 Optimizer]
-  │    ├─ QR barcode → barcode sync
-  │    ├─ price_card / price_default derivation
-  │    └─ discount_amount derivation
-  │
-  ├─[Field Defaults + Derivation]
-  │    ├─ apply_field_defaults  (GT-consistent "нет")
-  │    └─ apply_field_derivation  (price1_qr, price4_qr и др.)
-  │
-  └─[CSV Writer]
-       ├─ 29 полей, OUTPUT_COLUMNS — единственный источник правды
-       ├─ bbox: float ("2011.9"), timestamp: int
-       └─ utf-8-sig, без NaN/None как текста
+Видео .mp4
+    ↓
+[Detection] YOLOv8n tiled (4K→640×640 тайлы, mAP50=0.776) + MSER fallback
+    ↓
+[ByteTracker] + per-video lens correction (官方 Lenta calibration k1=-0.276)
+    ↓
+[QR/Barcode] WeChat QR → pyzbar → cv2.barcode → zxing-cpp → qreader
+    ↓
+[OCR] PaddleOCR (числа, цены) + EasyOCR ru (product_name)
+    ↓
+[Parser] price normalization, date, code, EAN-13 validation/repair
+    ↓
+[Catalog 4-tier lookup]
+    1. exact EAN-13 / SKU
+    2. prefix/substring fallback (OCR-битые barcode)
+    3. video-scoped dual-price lookup
+    4. C2 unique-word fuzzy snap
+    ↓
+[Derivation] price1_qr←price_default, price4_qr←price_card,
+             price2_qr, discount_amount, structural defaults
+    ↓
+[Track voting] multi-frame merge_candidate_tags
+    ↓
+[CSV] 29 колонок по схеме sample.csv Lenta
 ```
+
+### Ключевые архитектурные находки
+
+**1. Catalog-first approach** — один barcode hit = 4-5 catalog полей +
+5 derived полей одновременно. Дал breakthrough 0/274 → 35/274.
+
+**2. Per-video undistort** — официальная camera calibration от Lenta
+(k1=-0.276), применяется только к видео 25_xx (whitelist по smoke test).
+
+**3. C2 unique-word snap** — уникальное слово в product_name
+(Простоквашино, MOULIN) разрешает collision-кейсы в каталоге.
+
+**4. Multi-source derivation**:
+- `price1_qr ← price_default`, `price4_qr ← price_card`
+- `price2_qr = price1_qr × 0.95` (5% card discount rule)
+- `discount_amount = (price_default - price_card) / price_default`
+- Structural defaults: `wholesale_*`, `action_*` → `"нет"`
 
 ---
 
 ## Локальный запуск
 
-### Через venv
+### Требования
+
+- Python 3.10+
+- Poetry (или pip + requirements.txt)
+- ~4 GB RAM (CPU-only)
+- `libzbar0`, `ffmpeg` (Linux)
+
+### Установка
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-sudo apt-get install -y libzbar0 ffmpeg   # Linux
-python app.py
-```
-
-Открыть: `http://localhost:7860`
-
-### Через Poetry
-
-```bash
+git clone https://github.com/Fgeeha/Lenta-Tech-Life-Hack-2026.git
+cd Lenta-Tech-Life-Hack-2026
 sudo apt-get install -y libzbar0 ffmpeg
 poetry install
-python app.py
 ```
 
-### CLI
+### Генерация submission CSV
 
 ```bash
-PYTHONPATH=src python - <<'PY'
-from shelf import pipeline
-df = pipeline.run(
-    "video.mp4",
-    detector_name="hybrid",
-    interval_ms=300,
-    adaptive=True,
-    min_hits=2,
-    ocr_top_k=2,
-    output_csv="result.csv",
-)
-print(df.head())
-PY
+SHELF_UNDISTORT_OCR=auto PYTHONPATH=src poetry run python scripts/generate_submission.py \
+    --videos path/to/video1.mp4 path/to/video2.mp4 \
+    --out submission.csv \
+    --interval-ms 250 \
+    --ocr-engine paddle_v4 \
+    --ocr-top-k 2
 ```
 
-### Docker
+### Веб-интерфейс (Gradio)
 
 ```bash
-make docker-build && make docker-run
-# UI: http://localhost:7860
+poetry run python app.py
+# Открой http://localhost:7860
 ```
 
-### Веса детектора
+### Воспроизведение метрики
 
 ```bash
-# Положить сюда (автоматически подхватывается):
-models/pricetag_tiled_yolov8n.pt
-
-# Или задать явно:
-export SHELF_YOLO_WEIGHTS=/path/to/best.pt
-
-# Если весов нет — автоматически включается MSER fallback
-```
-
-### Catalog lookup
-
-```bash
-PYTHONPATH=src python scripts/build_catalog.py data/*.csv --out data/catalog.csv
-export SHELF_CATALOG_PATH=data/catalog.csv
-```
-
-### Undistort (видео 25_xx)
-
-```bash
-export SHELF_UNDISTORT_OCR=auto   # включит только для 25_12-20 и 25_2-10
-# или: 0 = off everywhere, 1 = on everywhere
-```
-
-### Feature flags (только для smoke/debug)
-
-```bash
-export SHELF_MSER_PROCESS_WIDTH=480
-export SHELF_MAX_TRACKS=2
-export SHELF_CODE_DECODE_MODE=off    # off|fast|full
-export SHELF_CODE_MAX_VARIANTS=24
+SHELF_UNDISTORT_OCR=auto PYTHONPATH=src poetry run python scripts/eval_ceiling.py \
+    --data-root Данные \
+    --ocr-engine paddle_v4 \
+    --json-out reports/ceiling.json
+# Ожидаемый результат: ALL_VALUE=0.1715 (47/274)
 ```
 
 ---
@@ -224,28 +164,29 @@ export SHELF_CODE_MAX_VARIANTS=24
 ## Структура проекта
 
 ```
-src/shelf/
-├── schema.py           # OUTPUT_COLUMNS, PriceTag
-├── pipeline.py         # video → CSV orchestrator
-├── detect/             # YOLO-tiled, MSER, detector factory, tracker
-├── io/                 # video sampler, CSV writer, distortion corrector
-├── ocr/                # OCR engine, preprocess, parser, template layout
-├── qr/                 # QR/barcode decoder, EAN-13 utilities
-└── postproc/           # catalog, dedup, merge, pass80, defaults, derivation
-
-scripts/
-├── eval_ceiling.py     # потолок: GT bbox + production OCR
-├── eval_on_labeled.py  # pipeline eval на размеченных видео
-└── build_catalog.py    # собрать catalog.csv из GT CSV
-
-data/
-└── catalog.csv         # local barcode/SKU catalog (266 записей)
-
-models/
-└── pricetag_tiled_yolov8n.pt   # YOLO веса (не в репо — положить вручную)
-
-tests/
-└── test_postproc_phase_a.py    # 176 тестов
+.
+├── src/shelf/
+│   ├── pipeline.py         # точка входа видео → CSV
+│   ├── schema.py           # PriceTag + 29 OUTPUT_COLUMNS
+│   ├── detect/             # YOLO-tiled, MSER, ByteTrack
+│   ├── io/                 # video sampler, CSV writer, distortion corrector
+│   ├── ocr/                # PaddleOCR, EasyOCR, layout parser
+│   ├── qr/                 # multi-decoder cascade, EAN-13, barcode ROI
+│   ├── postproc/           # catalog, voting, pass80, defaults, derivation
+│   └── ui/gradio_app.py    # Gradio web UI
+├── scripts/
+│   ├── generate_submission.py
+│   ├── eval_ceiling.py
+│   └── build_catalog.py
+├── tests/                  # 175 unit tests
+├── data/catalog.csv        # 266 barcode/SKU записей
+├── models/
+│   └── pricetag_tiled_yolov8n.pt
+├── reports/
+│   ├── ceiling_FINAL_pervideo.json
+│   └── submission_FINAL.csv
+├── app.py                  # Gradio entry point
+└── pyproject.toml
 ```
 
 ---
@@ -253,44 +194,45 @@ tests/
 ## Тесты
 
 ```bash
-PYTHONPATH=src pytest -q
-# 176 passed
+PYTHONPATH=src poetry run pytest tests/ -q
+# 175 passed
 ```
 
-Покрыты:
-- OCR parser: price, date, code, product_name, barcode/SKU
-- QR decoder: ключи short/long, case-insensitive, алиасы
-- EAN-13: checksum validation, repair
-- Writer: bbox float format ("2011.9"), timestamp int, NaN/None защита
-- Dedup: IoU merge, barcode merge
-- Catalog: 4-tier lookup, per-video mode imputation
-- Distortion: corrector math, undistort_bbox_coords, per-frame cache
-- Pass80: price derivation, card/default swap, discount amount
-- Defaults/derivation: field fill logic
+Покрыто: OCR parser, QR decoder, EAN-13 repair, catalog lookup,
+bbox float format, deduplication, field derivation, distortion corrector.
 
 ---
 
-## Ограничения и масштабирование
+## Ограничения
 
-| Ограничение | Текущее решение | Production-путь |
+| Ограничение | Факт | Попытки смягчения |
 |---|---|---|
-| Мелкий barcode (~3 px/цифра) | EAN-13 repair + ROI preprocessing | Остановка робота / macro-режим |
-| Нечитаемый QR (~20 px) | multi-frame QR fallback, qreader | Более крупный ROI, QR-detector |
-| product_name (~5–10 px) | Conservative parser, catalog lookup | Fine-tuned TrOCR/PaddleOCR |
-| Motion blur | top-K sharp crops, per-track voting | Burst mode, стабилизация |
-| Блики | HSV mask + inpaint | Поляризационный фильтр |
-| Скорость (4K, много треков) | SHELF_MAX_TRACKS, per-frame cache | GPU batch OCR, async pipeline |
-
-Проект полностью локальный: облачные API не используются ни на одном этапе.
+| QR/barcode recall ~18% | физический лимит камеры: 20-30px QR, 3-5px штрихкод | multi-frame, ROI upscale, anti-glare |
+| 49_5: 1/61 (2%) | съёмка через стекло + 13 SKU за 159.99₽ в каталоге | visual fingerprint (не реализовано) |
+| product_name OCR ~16% | стилизованные шрифты, мелкий многострочный текст | EasyOCR ru, fuzzy catalog match |
 
 ---
 
-## Команда
+## Идеи масштабирования
 
-| # | Роль |
-|---|---|
-| 1 | участник |
-| 2 | участник |
-| 3 | участник |
+- Template-aware OCR по `Расшифровка ценников.pdf` для per-template ROI
+- Visual fingerprint matching для collision-кейсов на молочке
+- RKNN/INT8 export для edge-deployment на роботе
+- Active learning: pseudo-labels из production для дообучения
+- Cross-store catalog из ERP всей Группы Лента
 
-Команда **«Стабилизируй это»**, Lenta Tech Life Hack 2026.
+---
+
+## Команда «Стабилизируй это»
+
+| Имя | Роль | Telegram |
+|---|---|---|
+| Колесников Никита | Капитан, ML/CV Engineer, MLOps | @fgeeha |
+| Сергей Левашов | ML/CV Engineer | @Tradeoffc |
+| Струганова Алина | аналитик данных | @morshkah |
+| Ваче Оганисян | аналитик данных | @v208404 |
+| Станислава Ивахненко | аналитик данных | @stasyssssss |
+
+---
+
+Хакатон **Lenta Tech Life Hack 2026** при поддержке Changellenge.
