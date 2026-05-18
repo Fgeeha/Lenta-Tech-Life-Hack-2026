@@ -539,3 +539,36 @@ def test_undistort_whitelist_auto_mode():
             os.environ.pop("SHELF_UNDISTORT_OCR", None)
         else:
             os.environ["SHELF_UNDISTORT_OCR"] = orig
+
+
+# ── Price plausibility guard ──────────────────────────────────────────────────
+
+def test_choose_prices_rejects_values_below_min():
+    """Values < 10 must be silently dropped — not returned as price_card/price_default."""
+    from shelf.ocr.parser import _choose_prices, PriceCandidate, OCRBox
+
+    def _mock_box(text: str, w: float = 0.1) -> OCRBox:
+        return OCRBox(text=text, conf=0.9, x0=0.0, y0=0.0, x1=w, y1=0.1)
+
+    low_cands = [
+        PriceCandidate(value=1.0, text="1", score=1.0, box=_mock_box("1"), context=""),
+        PriceCandidate(value=3.0, text="3", score=0.5, box=_mock_box("3"), context=""),
+    ]
+    card, default = _choose_prices(low_cands, [1.0, 3.0])
+    assert card == "", f"Expected no price_card, got {card!r}"
+    assert default == "", f"Expected no price_default, got {default!r}"
+
+
+def test_choose_prices_keeps_valid_price_with_noise():
+    """A valid price (>=10) survives even when < 10 noise is present."""
+    from shelf.ocr.parser import _choose_prices, PriceCandidate, OCRBox
+
+    def _mock_box(text: str, w: float = 0.1) -> OCRBox:
+        return OCRBox(text=text, conf=0.9, x0=0.0, y0=0.0, x1=w, y1=1.0)
+
+    valid = PriceCandidate(value=129.99, text="129.99", score=10.0,
+                           box=_mock_box("129.99", 0.1), context="")
+    noise = PriceCandidate(value=3.0, text="3", score=0.5,
+                           box=_mock_box("3", 0.01), context="")
+    card, default = _choose_prices([valid, noise], [129.99, 3.0])
+    assert card == "129,99", f"Expected 129,99, got {card!r}"

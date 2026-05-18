@@ -412,6 +412,9 @@ def _fix_digit_concat(default_val: float, card_val: float) -> float:
     return default_val
 
 
+_MIN_PRICE = 10.0  # minimum plausible shelf price in rubles
+
+
 def _choose_prices(
     price_candidates: list[PriceCandidate], all_prices: list[float]
 ) -> tuple[str, str]:
@@ -420,6 +423,8 @@ def _choose_prices(
     The main signal is still geometry/size, but explicit OCR context ("по карте",
     "без карты", "акция") wins when present.
     """
+    price_candidates = [c for c in price_candidates if c.value >= _MIN_PRICE]
+    all_prices = [p for p in all_prices if p >= _MIN_PRICE]
     if price_candidates:
         ordered_by_score = sorted(
             price_candidates, key=lambda c: c.score, reverse=True
