@@ -2,10 +2,10 @@
 
 import sys
 import time
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from unittest.mock import MagicMock
 
 import shelf.qr.decoder as decoder
 

@@ -51,7 +51,6 @@ def test_pass80_derives_price2_qr_5pct():
     tag = PriceTag(price_default="252,63")
     out, changes = optimize_tag(tag)
     # price2_qr should be 252.63 * 0.95 = 239.9985 → within 1.5 of GT 239.99
-    import math
     derived = float(out.price2_qr)
     assert abs(derived - 252.63 * 0.95) < 0.01
     assert any(c.field == "price2_qr" for c in changes)

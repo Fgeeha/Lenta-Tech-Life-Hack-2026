@@ -1,9 +1,7 @@
 """Tests for Phase A: field defaults and cross-field derivation."""
 
-import math
 import numpy as np
 import pandas as pd
-import pytest
 
 from shelf.postproc.defaults import apply_field_defaults
 from shelf.postproc.derive import apply_field_derivation
@@ -94,9 +92,13 @@ def test_empty_dataframe_safe():
 
 # ── Catalog lookup tests ──────────────────────────────────────────────────────
 
-def _make_catalog(entries: list[dict]) -> "Catalog":
+def _make_catalog(entries: list[dict]):
     """Build a minimal in-memory catalog for testing."""
-    from shelf.postproc.catalog import Catalog, CatalogEntry, _merge_catalog_entry
+    from shelf.postproc.catalog import (
+        Catalog,
+        CatalogEntry,
+        _merge_catalog_entry,
+    )
 
     catalog = Catalog()
     for e in entries:
@@ -232,9 +234,13 @@ def test_lookup_by_price_and_name_requires_video():
 
 # ── Fix #1: force_prices on exact barcode match ───────────────────────────────
 
-def _make_catalog_full(entries: list[dict]) -> "Catalog":
+def _make_catalog_full(entries: list[dict]):
     """Build catalog with all new fields for testing."""
-    from shelf.postproc.catalog import Catalog, CatalogEntry, _merge_catalog_entry
+    from shelf.postproc.catalog import (
+        Catalog,
+        CatalogEntry,
+        _merge_catalog_entry,
+    )
 
     catalog = Catalog()
     for e in entries:
@@ -429,8 +435,9 @@ def test_prepare_output_bbox_integer_input():
 # ── Distortion corrector ──────────────────────────────────────────────────────
 
 def test_distortion_corrector_preserves_frame_shape():
-    from shelf.io.distortion import DistortionCorrector
     import numpy as np
+
+    from shelf.io.distortion import DistortionCorrector
     dc = DistortionCorrector()
     frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
     undist = dc.get_undistorted_frame(frame, frame_id=0)
@@ -439,8 +446,9 @@ def test_distortion_corrector_preserves_frame_shape():
 
 
 def test_distortion_corrector_crop_preserves_coords():
-    from shelf.io.distortion import DistortionCorrector
     import numpy as np
+
+    from shelf.io.distortion import DistortionCorrector
     dc = DistortionCorrector()
     frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
     undist = dc.get_undistorted_frame(frame, frame_id=1)
@@ -450,8 +458,9 @@ def test_distortion_corrector_crop_preserves_coords():
 
 
 def test_distortion_corrector_full_frame_crops():
-    from shelf.io.distortion import DistortionCorrector
     import numpy as np
+
+    from shelf.io.distortion import DistortionCorrector
     dc = DistortionCorrector()
     frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
     undist = dc.undistort_full_frame(frame)
@@ -461,8 +470,9 @@ def test_distortion_corrector_full_frame_crops():
 
 
 def test_distortion_corrector_per_frame_cache():
-    from shelf.io.distortion import DistortionCorrector
     import numpy as np
+
+    from shelf.io.distortion import DistortionCorrector
     dc = DistortionCorrector()
     frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
     out1 = dc.get_undistorted_frame(frame, frame_id=42)
@@ -472,6 +482,7 @@ def test_distortion_corrector_per_frame_cache():
 
 def test_undistort_ocr_enabled_env():
     import os
+
     from shelf.io.distortion import undistort_ocr_enabled
     orig = os.environ.get("SHELF_UNDISTORT_OCR")
     try:
@@ -490,6 +501,7 @@ def test_undistort_ocr_enabled_env():
 
 def test_undistort_per_crop_size():
     import os
+
     from shelf.io.distortion import undistort_ocr_enabled_for_crop
     orig = os.environ.get("SHELF_UNDISTORT_OCR")
     try:
@@ -518,6 +530,7 @@ def test_undistort_per_crop_size():
 
 def test_undistort_whitelist_auto_mode():
     import os
+
     from shelf.io.distortion import undistort_ocr_enabled_for_filename
     orig = os.environ.get("SHELF_UNDISTORT_OCR")
     try:
@@ -545,7 +558,7 @@ def test_undistort_whitelist_auto_mode():
 
 def test_choose_prices_rejects_values_below_min():
     """Values < 10 must be silently dropped — not returned as price_card/price_default."""
-    from shelf.ocr.parser import _choose_prices, PriceCandidate, OCRBox
+    from shelf.ocr.parser import OCRBox, PriceCandidate, _choose_prices
 
     def _mock_box(text: str, w: float = 0.1) -> OCRBox:
         return OCRBox(text=text, conf=0.9, x0=0.0, y0=0.0, x1=w, y1=0.1)
@@ -561,7 +574,7 @@ def test_choose_prices_rejects_values_below_min():
 
 def test_choose_prices_keeps_valid_price_with_noise():
     """A valid price (>=10) survives even when < 10 noise is present."""
-    from shelf.ocr.parser import _choose_prices, PriceCandidate, OCRBox
+    from shelf.ocr.parser import OCRBox, PriceCandidate, _choose_prices
 
     def _mock_box(text: str, w: float = 0.1) -> OCRBox:
         return OCRBox(text=text, conf=0.9, x0=0.0, y0=0.0, x1=w, y1=1.0)

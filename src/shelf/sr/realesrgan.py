@@ -53,6 +53,7 @@ def _patch_torchvision() -> None:
     if "torchvision.transforms.functional_tensor" not in sys.modules:
         try:
             import types
+
             import torchvision.transforms.functional as _F
             _mod = types.ModuleType("torchvision.transforms.functional_tensor")
             for _attr in dir(_F):

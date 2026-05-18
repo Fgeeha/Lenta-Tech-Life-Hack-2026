@@ -13,7 +13,10 @@ import pandas as pd
 
 from shelf.detect.detector import make_detector
 from shelf.detect.tracker import TrackCandidate, Tracker
-from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled_for_filename
+from shelf.io.distortion import (
+    get_corrector,
+    undistort_ocr_enabled_for_filename,
+)
 from shelf.io.video import sample_frames
 from shelf.io.writer import prepare_output_dataframe, write_csv
 from shelf.ocr.engine import OCREngine
