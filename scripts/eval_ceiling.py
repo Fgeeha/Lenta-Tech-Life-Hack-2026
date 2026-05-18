@@ -297,6 +297,7 @@ def eval_video(
 
     barcode_count = 0
     qr_barcode_count = 0
+    per_tag_results: list[dict] = []
     gt_has_qr_count = 0
     gt_no_qr_count = 0
 
@@ -403,6 +404,22 @@ def eval_video(
             ):
                 field_hits_all[field] += 1
 
+        # Per-tag dump for near-miss analysis
+        wrong_all = [f for f in ALL_VALUE_FIELDS
+                     if not _field_match(pred.get(f, ""), gt_row.get(f, ""), field=f)]
+        empty_all = [f for f in wrong_all if not _present(pred.get(f, ""))]
+        _, correct_all = _score_fields(pred, gt_row, ALL_VALUE_FIELDS)
+        per_tag_results.append({
+            "video": name,
+            "ts": int(gt_row.get("frame_timestamp", 0)),
+            "pass80": score_all >= 0.80,
+            "score_all": round(score_all, 4),
+            "correct_all": correct_all,
+            "total_all": len(ALL_VALUE_FIELDS),
+            "wrong_fields": wrong_all,
+            "empty_fields": empty_all,
+        })
+
         if _gt_has_qr(gt_row):
             gt_has_qr_count += 1
             scores_no_qr_has_qr_gt.append(score_no_qr)
@@ -462,6 +479,7 @@ def eval_video(
         "fill_rates": {
             f: fill_hits[f] / max(1, n_total) for f in OUTPUT_COLUMNS
         },
+        "per_tag": per_tag_results,
     }
 
 
@@ -707,6 +725,12 @@ def main() -> None:
     if args.json_out:
         args.json_out.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        # Save per-tag breakdown alongside main JSON
+        per_tag_path = args.json_out.with_stem(args.json_out.stem + "_per_tag")
+        all_per_tag = [t for r in results for t in r.get("per_tag", [])]
+        per_tag_path.write_text(
+            json.dumps(all_per_tag, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     if args.append_metrics:
         append_metrics_md(summary)

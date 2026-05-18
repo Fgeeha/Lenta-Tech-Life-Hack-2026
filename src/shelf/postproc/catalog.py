@@ -451,7 +451,67 @@ def apply_catalog(
         data = tag.__dict__.copy()
         data = _apply_entry(data, entry, force_prices=force_prices)
         out.append(PriceTag(**data))
-    return out
+
+    # Second pass: fill still-empty metadata fields from per-video mode.
+    # Applies to ALL tags (matched and unmatched) where field is still absent.
+    # Only fields with strong per-video mode (>= 40% coverage) are imputed.
+    video_modes: dict[str, dict[str, str]] = {}
+
+    def _get_video_mode(vh: str) -> dict[str, str]:
+        if vh not in video_modes:
+            video_modes[vh] = _compute_video_mode(catalog, vh)
+        return video_modes[vh]
+
+    final: list[PriceTag] = []
+    for tag in out:
+        video = _video_hint_from_filename(getattr(tag, "filename", ""))
+        if not video:
+            final.append(tag)
+            continue
+        mode = _get_video_mode(video)
+        if not mode:
+            final.append(tag)
+            continue
+        data = tag.__dict__.copy()
+        changed = False
+        for field_name, value in mode.items():
+            if str(data.get(field_name, "") or "").strip() in _EMPTY:
+                data[field_name] = value
+                changed = True
+        final.append(PriceTag(**data) if changed else tag)
+
+    return final
+
+
+_MODE_IMPUTE_FIELDS = ("additional_info", "code")
+# print_datetime excluded: mode coverage < 40% across all videos (too varied)
+_MODE_COVERAGE_MIN = 0.40  # mode must cover >= 40% of catalog entries for a video
+
+
+def _compute_video_mode(catalog: "Catalog", video_hint: str) -> dict[str, str]:
+    """Return per-video mode for metadata fields with sufficient coverage.
+
+    Only imputes when the mode covers >= 40% of catalog entries for the video,
+    avoiding noise from single-occurrence values.
+    """
+    from collections import Counter
+
+    entries = [
+        e for bc, e in catalog.by_barcode.items()
+        if any(video_hint in sf for sf in e.source_files)
+    ]
+    if not entries:
+        return {}
+    result: dict[str, str] = {}
+    for field_name in _MODE_IMPUTE_FIELDS:
+        vals = [getattr(e, field_name, "") for e in entries if getattr(e, field_name, "")]
+        if not vals:
+            continue
+        counter = Counter(vals)
+        top_val, top_cnt = counter.most_common(1)[0]
+        if top_cnt / len(vals) >= _MODE_COVERAGE_MIN:
+            result[field_name] = top_val
+    return result
 
 
 def _merge_catalog_entry(
