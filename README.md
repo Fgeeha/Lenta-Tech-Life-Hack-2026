@@ -234,5 +234,3 @@ bbox float format, deduplication, field derivation, distortion corrector.
 | Станислава Ивахненко | аналитик данных | @stasyssssss |
 
 ---
-
-Хакатон **Lenta Tech Life Hack 2026** при поддержке Changellenge.
