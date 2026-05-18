@@ -74,6 +74,15 @@ def prepare_output_dataframe(
         if col in df.columns:
             df[col] = df[col].apply(_dot_price)
 
+    # frame_timestamp: write as integer ms (no trailing .0) to match sample.csv.
+    if "frame_timestamp" in df.columns:
+        df["frame_timestamp"] = (
+            pd.to_numeric(df["frame_timestamp"], errors="coerce")
+            .fillna(0)
+            .astype(int)
+            .astype(str)
+        )
+
     return df
 
 
