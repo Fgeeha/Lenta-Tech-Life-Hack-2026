@@ -488,6 +488,34 @@ def test_undistort_ocr_enabled_env():
             os.environ["SHELF_UNDISTORT_OCR"] = orig
 
 
+def test_undistort_per_crop_size():
+    import os
+    from shelf.io.distortion import undistort_ocr_enabled_for_crop
+    orig = os.environ.get("SHELF_UNDISTORT_OCR")
+    try:
+        os.environ["SHELF_UNDISTORT_OCR"] = "auto"
+        # Small crop (100×100=10_000 < 80_000) → undistort
+        assert undistort_ocr_enabled_for_crop(bbox=(0, 0, 100, 100)) is True
+        # Large crop (400×400=160_000 > 80_000) → no undistort
+        assert undistort_ocr_enabled_for_crop(bbox=(0, 0, 400, 400)) is False
+        # Exactly at threshold (283×283≈80_000) → no undistort (>= threshold)
+        assert undistort_ocr_enabled_for_crop(bbox=(0, 0, 285, 285)) is False
+        # No bbox → falls back to filename whitelist
+        assert undistort_ocr_enabled_for_crop(filename="25_12-20.mp4") is True
+        assert undistort_ocr_enabled_for_crop(filename="43_15.mp4") is False
+        # env=0 → always off
+        os.environ["SHELF_UNDISTORT_OCR"] = "0"
+        assert undistort_ocr_enabled_for_crop(bbox=(0, 0, 50, 50)) is False
+        # env=1 → always on
+        os.environ["SHELF_UNDISTORT_OCR"] = "1"
+        assert undistort_ocr_enabled_for_crop(bbox=(0, 0, 1000, 1000)) is True
+    finally:
+        if orig is None:
+            os.environ.pop("SHELF_UNDISTORT_OCR", None)
+        else:
+            os.environ["SHELF_UNDISTORT_OCR"] = orig
+
+
 def test_undistort_whitelist_auto_mode():
     import os
     from shelf.io.distortion import undistort_ocr_enabled_for_filename

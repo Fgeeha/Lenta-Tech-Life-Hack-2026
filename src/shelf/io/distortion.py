@@ -128,6 +128,10 @@ def get_corrector() -> DistortionCorrector:
 # 25_xx → +4 and +2 tags; 26_12-20 → -4; 43_15 → -1; 49_5 → 0
 _UNDISTORT_WHITELIST = {"25_12-20", "25_2-10"}
 
+# Per-crop size threshold: small crops (far/edge, strong fisheye) benefit from
+# undistort; large crops (close/center) are hurt by it.  ~280×280 px empirical.
+_UNDISTORT_CROP_SIZE_THRESHOLD = 80_000  # px²
+
 
 def undistort_ocr_enabled_for_filename(filename: str = "") -> bool:
     """Per-video undistort selection based on May 18 full eval.
@@ -149,8 +153,35 @@ def undistort_ocr_enabled_for_filename(filename: str = "") -> bool:
     return any(wl in name for wl in _UNDISTORT_WHITELIST)
 
 
+def undistort_ocr_enabled_for_crop(
+    filename: str = "",
+    bbox: tuple | None = None,
+) -> bool:
+    """Per-crop undistort decision (size-based in auto mode).
+
+    SHELF_UNDISTORT_OCR env:
+        0 or unset  — force off everywhere
+        1           — force on everywhere
+        auto        — size-based: undistort small crops (area < threshold),
+                      fall back to filename whitelist when bbox not provided
+    """
+    override = os.environ.get("SHELF_UNDISTORT_OCR", "").strip()
+    if override == "0" or override == "":
+        return False
+    if override == "1":
+        return True
+    # auto mode
+    if bbox is not None and len(bbox) == 4:
+        x1, y1, x2, y2 = bbox
+        area = max(0.0, float(x2) - float(x1)) * max(0.0, float(y2) - float(y1))
+        return area < _UNDISTORT_CROP_SIZE_THRESHOLD
+    # no bbox → fall back to filename whitelist
+    name = os.path.basename(filename)
+    return any(wl in name for wl in _UNDISTORT_WHITELIST)
+
+
 def undistort_ocr_enabled() -> bool:
-    """Legacy global flag. Use undistort_ocr_enabled_for_filename() in pipeline."""
+    """Legacy global flag. Use undistort_ocr_enabled_for_crop() in pipeline."""
     return os.environ.get("SHELF_UNDISTORT_OCR", "0").strip() == "1"
 
 

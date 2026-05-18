@@ -13,7 +13,7 @@ import pandas as pd
 
 from shelf.detect.detector import make_detector
 from shelf.detect.tracker import TrackCandidate, Tracker
-from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled_for_filename
+from shelf.io.distortion import get_corrector, get_undistorted_frame, undistort_ocr_enabled_for_crop
 from shelf.io.video import sample_frames
 from shelf.io.writer import prepare_output_dataframe, write_csv
 from shelf.ocr.engine import OCREngine
@@ -225,14 +225,17 @@ def run(
         # Detection on original frame (bboxes stay in original coords for CSV).
         # When undistort enabled, tracker uses undistort_crop_at_orig_bbox so OCR
         # crops are geometrically correct without shifting submission bbox coords.
-        if undistort_ocr_enabled_for_filename(filename):
+        _override = __import__("os").environ.get("SHELF_UNDISTORT_OCR", "")
+        if _override in ("", "0"):
+            tracker.update(dets, frame, ts_ms)
+        else:
             _corr = get_corrector()
             _fid = frame_count
             def _crop_fn(f, bbox, _corr=_corr, _fid=_fid):
-                return _corr.undistort_crop_at_orig_bbox(f, bbox, frame_id=_fid)
+                if undistort_ocr_enabled_for_crop(bbox=bbox):
+                    return _corr.undistort_crop_at_orig_bbox(f, bbox, frame_id=_fid)
+                return f[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]
             tracker.update(dets, frame, ts_ms, crop_fn=_crop_fn)
-        else:
-            tracker.update(dets, frame, ts_ms)
         frame_count += 1
         if frame_count % 25 == 0:
             _progress(
