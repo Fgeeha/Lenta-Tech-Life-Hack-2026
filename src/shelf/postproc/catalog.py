@@ -419,7 +419,13 @@ def apply_catalog(
         entry = catalog.lookup(
             barcode=tag.barcode, qr_barcode=tag.qr_code_barcode, sku=tag.id_sku
         )
-        exact_match = entry is not None
+        # force_prices: overwrite OCR prices when the match is high-confidence.
+        # Tier 1 (barcode/SKU exact): always force — catalog is authoritative.
+        # Tier 2 (price_card unique in video): force — price_card already matched,
+        #   so price_default from catalog is safe to fill even over wrong OCR values.
+        # Tier 3+ (fuzzy name / unique word): do NOT force — match confidence
+        #   is lower and wrong product could corrupt correct OCR prices.
+        force_prices = entry is not None  # tier 1
         if entry is None:
             video = _video_hint_from_filename(getattr(tag, "filename", ""))
             entry = catalog.lookup_by_video_price(
@@ -427,6 +433,8 @@ def apply_catalog(
                 price_default=str(getattr(tag, "price_default", "") or ""),
                 video_hint=video,
             )
+            if entry is not None:
+                force_prices = True  # tier 2: unique price_card match
         if entry is None:
             video = _video_hint_from_filename(getattr(tag, "filename", ""))
             entry = catalog.lookup_by_video_price_and_name(
@@ -445,7 +453,7 @@ def apply_catalog(
             out.append(tag)
             continue
         data = tag.__dict__.copy()
-        data = _apply_entry(data, entry, force_prices=exact_match)
+        data = _apply_entry(data, entry, force_prices=force_prices)
         out.append(PriceTag(**data))
     return out
 
