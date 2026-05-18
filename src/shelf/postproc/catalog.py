@@ -475,7 +475,9 @@ def apply_catalog(
         data = tag.__dict__.copy()
         changed = False
         for field_name, value in mode.items():
-            if str(data.get(field_name, "") or "").strip() in _EMPTY:
+            current = str(data.get(field_name, "") or "").strip()
+            # Only fill when completely absent (not "нет" which is a valid field value)
+            if current in ("", None):
                 data[field_name] = value
                 changed = True
         final.append(PriceTag(**data) if changed else tag)
