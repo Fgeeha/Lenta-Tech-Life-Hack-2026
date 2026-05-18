@@ -129,7 +129,7 @@ def find_barcode_strip(img: np.ndarray) -> tuple[int, int, int, int] | None:
     abs_x = np.abs(sobel_x).astype(np.uint8)
 
     # Merge barcode stripes horizontally
-    kw = min(W // 8, 40)
+    kw = max(1, min(W // 8, 40))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, 5))
     closed = cv2.morphologyEx(abs_x, cv2.MORPH_CLOSE, kernel)
     _, thresh = cv2.threshold(closed, 30, 255, cv2.THRESH_BINARY)
