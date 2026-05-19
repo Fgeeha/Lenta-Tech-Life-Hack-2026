@@ -383,4 +383,3 @@ Workflow: `.github/workflows/ci.yml`. Деплой через `scripts/deploy_hf
 | Ваче Оганисян | Аналитик данных                | @v208404 |
 | Станислава Ивахненко | Аналитик данных                | @stasyssssss |
 
----
