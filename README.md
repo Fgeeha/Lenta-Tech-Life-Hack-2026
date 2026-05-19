@@ -258,8 +258,7 @@ poetry run python app.py
 # Открой http://localhost:7860
 ```
 
-<!-- TODO: положи скриншот в docs/screenshots/gradio.png и раскомментируй строку ниже -->
-<!-- ![Gradio UI](docs/screenshots/gradio.png) -->
+![Gradio UI](docs/screenshots/gradio.jpg)
 
 ## Docker
 
